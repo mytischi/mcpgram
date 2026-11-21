@@ -463,7 +463,11 @@ func (i *Ingestor) cmdStatus(ctx context.Context, chatID, userID int64) error {
 	fmt.Fprintf(&b, "• Бот: @%s (id=%d)\n", i.botUsername, i.botID)
 	fmt.Fprintf(&b, "• Чтение групп: %s\n", privacyState)
 	fmt.Fprintf(&b, "• Политика истории по умолчанию: %s\n", i.cfg.DefaultHistoryPolicy)
-	fmt.Fprintf(&b, "• Retention: %d дн. | Ignore tag: %s\n", i.cfg.RetentionDays, i.cfg.IgnoreTag)
+	retentionLabel := "бессрочно (отключено)"
+	if i.cfg.RetentionDays > 0 {
+		retentionLabel = fmt.Sprintf("%d дн.", i.cfg.RetentionDays)
+	}
+	fmt.Fprintf(&b, "• Retention: %s | Ignore tag: %s\n", retentionLabel, i.cfg.IgnoreTag)
 	fmt.Fprintf(&b, "• Отслеживаемых чатов: %d\n", len(chats))
 
 	for _, c := range chats {

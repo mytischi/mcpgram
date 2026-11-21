@@ -20,8 +20,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DefaultHistoryPolicy != HistoryPolicyFull {
 		t.Fatalf("expected default history policy %q, got %q", HistoryPolicyFull, cfg.DefaultHistoryPolicy)
 	}
-	if cfg.RetentionDays != 90 {
-		t.Fatalf("expected RetentionDays=90, got %d", cfg.RetentionDays)
+	if cfg.RetentionDays != 0 {
+		t.Fatalf("expected RetentionDays=0 (unlimited by default), got %d", cfg.RetentionDays)
 	}
 	if cfg.TokenTTLDays != 90 {
 		t.Fatalf("expected TokenTTLDays=90, got %d", cfg.TokenTTLDays)

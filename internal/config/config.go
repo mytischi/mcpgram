@@ -105,8 +105,8 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	}
 	cfg.DefaultHistoryPolicy = policy
 
-	// Retention days (0 disables automatic deletion)
-	retentionRaw := get("RETENTION_DAYS", "90")
+	// Retention days (0 = keep forever, default; > 0 enables automatic TTL cleanup)
+	retentionRaw := get("RETENTION_DAYS", "0")
 	retention, err := strconv.Atoi(retentionRaw)
 	if err != nil || retention < 0 {
 		return Config{}, fmt.Errorf("invalid RETENTION_DAYS %q: must be >= 0", retentionRaw)
