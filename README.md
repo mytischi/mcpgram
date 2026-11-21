@@ -18,8 +18,8 @@ Currently under active development (v0.1 MVP):
 
 - [x] Stage 0: Repository scaffold, Go module, configuration & validation
 - [x] Stage 1: SQLite WAL + FTS5 storage layer, migrations, group migration handling, `#offrecord`, TTL retention, RBAC SQL queries & unit tests
-- [ ] Stage 2: Telegram Bot API client, Long Polling ingestor & bot commands (`/auth`, `/status`, `/revoke_user`)
-- [ ] Stage 3: Hybrid RBAC authorizer (`chat_member` + TTL `getChatMember`)
+- [x] Stage 2: Telegram Bot API client, Long Polling ingestor & bot commands (`/auth`, `/status`, `/revoke_user`)
+- [x] Stage 3: Hybrid RBAC authorizer (`chat_member` + TTL `getChatMember` + fail-closed SQL freshness)
 - [ ] Stage 4: Streamable HTTP MCP server (`list_chats`, `search_messages`, `get_messages`, `get_thread`)
 - [ ] Stage 5: Telegram Desktop JSON (`result.json`) importer & Docker packaging (`lite` profile)
 

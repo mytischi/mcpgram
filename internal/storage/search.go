@@ -92,13 +92,14 @@ func (s *Store) SearchMessages(ctx context.Context, params SearchParams) ([]Mess
 			acl.status IN ('creator', 'administrator', 'member')
 			OR (acl.status = 'restricted' AND acl.is_member = 1)
 		  )
+		  AND (? <= 0 OR acl.checked_at >= ?)
 		  AND (
 			COALESCE(c.history_policy_override, ?) = 'full_history'
 			OR acl.joined_at IS NULL
 			OR m.created_at >= acl.joined_at
 		  )
 	`
-	args := []any{params.TelegramUserID, ftsQuery, string(policy)}
+	args := []any{params.TelegramUserID, ftsQuery, params.MinACLCheckedAt, params.MinACLCheckedAt, string(policy)}
 
 	if params.WorkspaceChatID != "" {
 		query += ` AND m.workspace_chat_id = ?`

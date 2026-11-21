@@ -105,6 +105,7 @@ type SearchParams struct {
 	Query                string
 	TopicID              *int64
 	DefaultHistoryPolicy config.HistoryPolicy
+	MinACLCheckedAt      int64 // optional: when > 0, enforces fail-closed ACL freshness in SQL
 	Limit                int
 }
 
@@ -117,6 +118,7 @@ type MessageFilter struct {
 	TopicID              *int64
 	Author               string // optional match against sender_name or sender_username
 	DefaultHistoryPolicy config.HistoryPolicy
+	MinACLCheckedAt      int64 // optional: when > 0, enforces fail-closed ACL freshness in SQL
 	Limit                int
 }
 
@@ -126,6 +128,7 @@ type ThreadParams struct {
 	WorkspaceChatID      string
 	TelegramMessageID    int64
 	DefaultHistoryPolicy config.HistoryPolicy
+	MinACLCheckedAt      int64 // optional: when > 0, enforces fail-closed ACL freshness in SQL
 	Limit                int
 }
 

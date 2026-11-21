@@ -582,10 +582,15 @@ func (s *Store) ListAllChats(ctx context.Context) ([]Chat, error) {
 }
 
 // ListAccessibleChats returns chats accessible to telegramUserID according to chat_acl,
-// including forum topics and last message timestamp.
-func (s *Store) ListAccessibleChats(ctx context.Context, telegramUserID int64, defaultPolicy config.HistoryPolicy) ([]ChatSummary, error) {
+// including forum topics and last message timestamp. When minACLCheckedAt > 0, stale ACL
+// records older than that timestamp are excluded (fail-closed).
+func (s *Store) ListAccessibleChats(ctx context.Context, telegramUserID int64, defaultPolicy config.HistoryPolicy, minACLCheckedAt ...int64) ([]ChatSummary, error) {
 	if !defaultPolicy.Valid() {
 		defaultPolicy = config.HistoryPolicyFull
+	}
+	var minChecked int64
+	if len(minACLCheckedAt) > 0 {
+		minChecked = minACLCheckedAt[0]
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
@@ -611,9 +616,10 @@ func (s *Store) ListAccessibleChats(ctx context.Context, telegramUserID int64, d
 			acl.status IN ('creator', 'administrator', 'member')
 			OR (acl.status = 'restricted' AND acl.is_member = 1)
 		)
+		  AND (? <= 0 OR acl.checked_at >= ?)
 		GROUP BY c.workspace_chat_id, c.title, c.chat_type, c.is_forum
 		ORDER BY COALESCE(MAX(m.created_at), c.updated_at) DESC, c.title ASC
-	`, telegramUserID, string(defaultPolicy))
+	`, telegramUserID, string(defaultPolicy), minChecked, minChecked)
 	if err != nil {
 		return nil, fmt.Errorf("list accessible chats: %w", err)
 	}
@@ -714,13 +720,14 @@ func (s *Store) GetMessages(ctx context.Context, filter MessageFilter) ([]Messag
 			acl.status IN ('creator', 'administrator', 'member')
 			OR (acl.status = 'restricted' AND acl.is_member = 1)
 		  )
+		  AND (? <= 0 OR acl.checked_at >= ?)
 		  AND (
 			COALESCE(c.history_policy_override, ?) = 'full_history'
 			OR acl.joined_at IS NULL
 			OR m.created_at >= acl.joined_at
 		  )
 	`
-	args := []any{filter.TelegramUserID, filter.WorkspaceChatID, string(policy)}
+	args := []any{filter.TelegramUserID, filter.WorkspaceChatID, filter.MinACLCheckedAt, filter.MinACLCheckedAt, string(policy)}
 
 	if filter.FromUnix != nil {
 		query += ` AND m.created_at >= ?`
@@ -793,6 +800,7 @@ func (s *Store) GetThread(ctx context.Context, params ThreadParams) ([]Message, 
 				acl.status IN ('creator', 'administrator', 'member')
 				OR (acl.status = 'restricted' AND acl.is_member = 1)
 			  )
+			  AND (? <= 0 OR acl.checked_at >= ?)
 			  AND (
 				COALESCE(c.history_policy_override, ?) = 'full_history'
 				OR acl.joined_at IS NULL
@@ -846,6 +854,8 @@ func (s *Store) GetThread(ctx context.Context, params ThreadParams) ([]Message, 
 	rows, err := s.db.QueryContext(ctx, query,
 		params.TelegramUserID,
 		params.WorkspaceChatID,
+		params.MinACLCheckedAt,
+		params.MinACLCheckedAt,
 		string(policy),
 		params.TelegramMessageID,
 		limit,
