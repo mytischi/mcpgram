@@ -1,0 +1,22 @@
+# Binaries & build artifacts
+/bin/
+/dist/
+mcpgram
+*.exe
+*.out
+*.test
+
+# Local environment & runtime data
+.env
+.env.local
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# OS & editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
