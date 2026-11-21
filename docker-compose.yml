@@ -1,0 +1,27 @@
+services:
+  mcpgram:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/mytischi/mcpgram:latest
+    container_name: mcpgram
+    profiles: ["lite"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite:///data/mcpgram.db
+      LISTEN_ADDR: ":8080"
+    ports:
+      - "8080:8080"
+    volumes:
+      - mcpgram_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mcpgram_data:
