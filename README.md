@@ -4,6 +4,8 @@ Self-hosted Telegram Corporate MCP Server written in Go.
 
 Allows employees to safely connect their AI agents (Cursor, Claude Desktop, OpenCode, CLI agents, etc.) to corporate Telegram group chats via **MCP (Model Context Protocol)** over Streamable HTTP — with strict Read-Only access and dynamic RBAC synchronized with Telegram chat membership.
 
+> **Полное руководство (RU):** см. [docs/MANUAL.md](docs/MANUAL.md) — пошаговое развёртывание (`lite` и `pro`), справочник `.env`, подключение сотрудников, Day-2 эксплуатация и диагностика.
+
 ## Key Principles
 
 - **Privacy by default:** all messages stay inside your infrastructure (local SQLite WAL + FTS5 in `lite` mode); no access to personal DMs.
