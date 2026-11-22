@@ -132,6 +132,34 @@ type ThreadParams struct {
 	Limit                int
 }
 
+// DailyDigest stores a precomputed nightly summary for one chat on one calendar day.
+type DailyDigest struct {
+	WorkspaceChatID string
+	DigestDate      string // YYYY-MM-DD in configured digest timezone
+	PeriodStart     int64  // Unix timestamp seconds (inclusive)
+	PeriodEnd       int64  // Unix timestamp seconds (inclusive)
+	MessageCount    int
+	LastMessageID   int64
+	Summary         string
+	KeyDecisions    []string
+	ActionItems     []string
+	Topics          []string
+	Model           string
+	CreatedAt       int64
+	UpdatedAt       int64
+}
+
+// DigestFilter configures an RBAC-filtered digest query for MCP get_digests.
+type DigestFilter struct {
+	TelegramUserID       int64
+	WorkspaceChatID      string
+	FromDate             string // optional YYYY-MM-DD (inclusive)
+	ToDate               string // optional YYYY-MM-DD (inclusive)
+	DefaultHistoryPolicy config.HistoryPolicy
+	MinACLCheckedAt      int64 // optional: when > 0, enforces fail-closed ACL freshness in SQL
+	Limit                int
+}
+
 // IsAllowedMemberStatus enforces the strict Telegram membership allowlist:
 // creator, administrator, member, or restricted ONLY when isMember == true.
 func IsAllowedMemberStatus(status string, isMember bool) bool {

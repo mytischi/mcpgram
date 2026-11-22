@@ -79,6 +79,11 @@ func TestLoadValidationErrors(t *testing.T) {
 		{"invalid rbac ttl", map[string]string{"RBAC_CACHE_TTL": "notaduration"}},
 		{"invalid proxy scheme", map[string]string{"TELEGRAM_PROXY_URL": "ftp://proxy:21"}},
 		{"invalid log level", map[string]string{"LOG_LEVEL": "trace"}},
+		{"invalid digest mode", map[string]string{"DIGEST_MODE": "magic"}},
+		{"digest missing base url", map[string]string{"DIGEST_MODE": "openai_compatible", "DIGEST_MODEL": "qwen2.5:7b"}},
+		{"digest missing model", map[string]string{"DIGEST_MODE": "openai_compatible", "DIGEST_BASE_URL": "http://127.0.0.1:11434/v1"}},
+		{"digest bad hour", map[string]string{"DIGEST_SCHEDULE_HOUR": "25"}},
+		{"digest bad timezone", map[string]string{"DIGEST_TIMEZONE": "Mars/Olympus"}},
 	}
 
 	for _, tc := range cases {
@@ -87,5 +92,26 @@ func TestLoadValidationErrors(t *testing.T) {
 				t.Fatalf("expected error for case %q", tc.name)
 			}
 		})
+	}
+}
+
+func TestLoadDigestConfig(t *testing.T) {
+	cfg, err := LoadFromLookup(mapLookup(map[string]string{
+		"DIGEST_MODE":          "openai_compatible",
+		"DIGEST_BASE_URL":      "http://127.0.0.1:11434/v1/",
+		"DIGEST_MODEL":         "qwen2.5:7b",
+		"DIGEST_SCHEDULE_HOUR": "4",
+		"DIGEST_TIMEZONE":      "Europe/Moscow",
+		"DIGEST_MIN_MESSAGES":  "5",
+		"DIGEST_LOOKBACK_DAYS": "14",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.DigestMode != DigestModeOpenAICompatible || cfg.DigestBaseURL != "http://127.0.0.1:11434/v1" {
+		t.Fatalf("unexpected digest config: %+v", cfg)
+	}
+	if cfg.DigestScheduleHour != 4 || cfg.DigestTimezone != "Europe/Moscow" || cfg.DigestMinMessages != 5 || cfg.DigestLookbackDays != 14 {
+		t.Fatalf("unexpected digest schedule: %+v", cfg)
 	}
 }

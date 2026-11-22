@@ -171,6 +171,50 @@ func TestStreamableHTTPMCPAuthAndRBACEndToEnd(t *testing.T) {
 		t.Fatalf("expected 2 messages in thread, got %d", threadOut.Count)
 	}
 
+	// 7b. get_digests returns precomputed digest for Backend and rejects Finance.
+	_ = store.UpsertDigest(ctx, storage.DailyDigest{
+		WorkspaceChatID: chat1.WorkspaceChatID,
+		DigestDate:      "2026-11-21",
+		PeriodStart:     1700000000,
+		PeriodEnd:       1700086399,
+		MessageCount:    2,
+		LastMessageID:   2,
+		Summary:         "Agreed to deploy v1.2 on Friday",
+		KeyDecisions:    []string{"Deploy v1.2 Friday"},
+		Model:           "qwen2.5:7b",
+	})
+	_ = store.UpsertDigest(ctx, storage.DailyDigest{
+		WorkspaceChatID: chat2.WorkspaceChatID,
+		DigestDate:      "2026-11-21",
+		PeriodStart:     1700000000,
+		PeriodEnd:       1700086399,
+		MessageCount:    1,
+		LastMessageID:   1,
+		Summary:         "Secret Finance digest",
+	})
+
+	res, err = session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "get_digests",
+		Arguments: map[string]any{"chat_id": chat1.WorkspaceChatID, "from_date": "2026-11-01", "to_date": "2026-11-30"},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("get_digests failed: res=%+v err=%v", res, err)
+	}
+	var digestsOut digestsOutput
+	raw, _ = json.Marshal(res.StructuredContent)
+	_ = json.Unmarshal(raw, &digestsOut)
+	if digestsOut.Count != 1 || digestsOut.Digests[0].Summary != "Agreed to deploy v1.2 on Friday" {
+		t.Fatalf("unexpected get_digests output: %+v", digestsOut)
+	}
+
+	res, err = session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "get_digests",
+		Arguments: map[string]any{"chat_id": chat2.WorkspaceChatID},
+	})
+	if err != nil || !res.IsError {
+		t.Fatalf("expected forbidden tool error on Finance get_digests, got res=%+v err=%v", res, err)
+	}
+
 	// 8. Revoking user 101 immediately blocks further MCP requests with 401.
 	if _, err := store.RevokeUserTokens(ctx, 101); err != nil {
 		t.Fatalf("revoke tokens: %v", err)

@@ -27,18 +27,32 @@ type AccessChecker interface {
 	HasAnyTrackedChatAccess(ctx context.Context, telegramUserID int64) (bool, error)
 }
 
+// DigestTrigger allows admin /digest commands to invoke nightly digest generation on demand.
+type DigestTrigger interface {
+	Enabled() bool
+	RunPending(ctx context.Context) (generated, skipped, failed int, err error)
+	RunForDate(ctx context.Context, dateStr string, force bool) (generated, skipped, failed int, err error)
+	TodayDate() string
+}
+
 // Ingestor polls Telegram updates, stores group messages/topics/ACL, and handles DM bot commands.
 type Ingestor struct {
-	api         API
-	store       *storage.Store
-	cfg         config.Config
-	access      AccessChecker
-	logger      *slog.Logger
-	pollTimeout int
-	botID       int64
-	botUsername string
-	canReadAll  bool
-	nowFunc     func() time.Time
+	api          API
+	store        *storage.Store
+	cfg          config.Config
+	access       AccessChecker
+	digestRunner DigestTrigger
+	logger       *slog.Logger
+	pollTimeout  int
+	botID        int64
+	botUsername  string
+	canReadAll   bool
+	nowFunc      func() time.Time
+}
+
+// SetDigestRunner attaches an optional DigestTrigger for the admin /digest command.
+func (i *Ingestor) SetDigestRunner(runner DigestTrigger) {
+	i.digestRunner = runner
 }
 
 // NewIngestor creates an Ingestor bound to a Telegram API client, storage, config, and RBAC checker.
@@ -92,6 +106,7 @@ func (i *Ingestor) Bootstrap(ctx context.Context) (int64, error) {
 	commands := []BotCommand{
 		{Command: "auth", Description: "Получить персональный Bearer-токен для MCP-клиента"},
 		{Command: "status", Description: "[Admin] Проверить состояние бота и отслеживаемых чатов"},
+		{Command: "digest", Description: "[Admin] Запустить генерацию дневных дайджестов"},
 		{Command: "set_policy", Description: "[Admin] Политика истории для чата (full_history|since_join|default)"},
 		{Command: "revoke_user", Description: "[Admin] Отозвать токены сотрудника по Telegram ID"},
 	}
@@ -390,6 +405,7 @@ func (i *Ingestor) handlePrivateCommand(ctx context.Context, msg *Message) error
 				"Доступные команды:\n"+
 				"• /auth — получить персональный Bearer-токен для MCP-клиента\n"+
 				"• /status — диагностика сервера (только для администраторов)\n"+
+				"• /digest [YYYY-MM-DD|today] — запустить генерацию дайджестов (только для администраторов)\n"+
 				"• /set_policy <workspace_chat_id> <full_history|since_join|default> — политика истории для чата (только для администраторов)\n"+
 				"• /revoke_user <telegram_user_id> — мгновенный отзыв токенов (только для администраторов)",
 			userID,
@@ -401,6 +417,9 @@ func (i *Ingestor) handlePrivateCommand(ctx context.Context, msg *Message) error
 
 	case "/status":
 		return i.cmdStatus(ctx, msg.Chat.ID, userID)
+
+	case "/digest":
+		return i.cmdDigest(ctx, msg.Chat.ID, userID, fields[1:])
 
 	case "/set_policy":
 		return i.cmdSetPolicy(ctx, msg.Chat.ID, userID, fields[1:])
@@ -515,7 +534,12 @@ func (i *Ingestor) cmdStatus(ctx context.Context, chatID, userID int64) error {
 	if i.cfg.RetentionDays > 0 {
 		retentionLabel = fmt.Sprintf("%d дн.", i.cfg.RetentionDays)
 	}
+	digestLabel := "отключены (DIGEST_MODE=off)"
+	if i.cfg.DigestMode == config.DigestModeOpenAICompatible {
+		digestLabel = fmt.Sprintf("включены (%s, %02d:00 %s)", i.cfg.DigestModel, i.cfg.DigestScheduleHour, i.cfg.DigestTimezone)
+	}
 	fmt.Fprintf(&b, "• Retention: %s | Ignore tag: %s\n", retentionLabel, i.cfg.IgnoreTag)
+	fmt.Fprintf(&b, "• Ночные дайджесты: %s\n", digestLabel)
 	fmt.Fprintf(&b, "• Отслеживаемых чатов: %d\n", len(chats))
 
 	for _, c := range chats {
@@ -554,5 +578,39 @@ func (i *Ingestor) cmdRevokeUser(ctx context.Context, chatID, userID int64, args
 
 	return i.api.SendMessage(ctx, chatID,
 		fmt.Sprintf("Токены пользователя %d отозваны (активных аннулировано: %d).", targetID, count),
+	)
+}
+
+func (i *Ingestor) cmdDigest(ctx context.Context, chatID, userID int64, args []string) error {
+	if !i.cfg.IsAdmin(userID) {
+		return i.api.SendMessage(ctx, chatID, "Команда /digest доступна только администраторам (ADMIN_TG_IDS).")
+	}
+	if i.digestRunner == nil || !i.digestRunner.Enabled() {
+		return i.api.SendMessage(ctx, chatID,
+			"Ночные дайджесты отключены. Включите DIGEST_MODE=openai_compatible (и DIGEST_BASE_URL + DIGEST_MODEL) в .env.",
+		)
+	}
+
+	var generated, skipped, failed int
+	var err error
+	var label string
+
+	if len(args) == 0 {
+		label = fmt.Sprintf("за последние %d дн.", i.cfg.DigestLookbackDays)
+		generated, skipped, failed, err = i.digestRunner.RunPending(ctx)
+	} else {
+		targetDate := strings.ToLower(strings.TrimSpace(args[0]))
+		if targetDate == "today" {
+			targetDate = i.digestRunner.TodayDate()
+		}
+		label = "за " + targetDate
+		generated, skipped, failed, err = i.digestRunner.RunForDate(ctx, targetDate, true)
+	}
+	if err != nil {
+		return i.api.SendMessage(ctx, chatID, fmt.Sprintf("Ошибка генерации дайджестов (%s): %v", label, err))
+	}
+
+	return i.api.SendMessage(ctx, chatID,
+		fmt.Sprintf("Дайджесты %s готовы: создано/обновлено=%d, пропущено=%d, ошибок=%d.", label, generated, skipped, failed),
 	)
 }

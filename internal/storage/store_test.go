@@ -459,3 +459,85 @@ func TestBuildFTSQueryPunctuationSafety(t *testing.T) {
 		t.Fatalf("expected 1 result, got %d", len(res))
 	}
 }
+
+func TestDailyDigestsRBACAndSinceJoin(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	chat, err := s.UpsertChat(ctx, Chat{TelegramChatID: -500, Title: "Product"})
+	if err != nil {
+		t.Fatalf("upsert chat: %v", err)
+	}
+
+	// Day 1: [1000..1999], Day 2: [2000..2999]
+	if err := s.UpsertDigest(ctx, DailyDigest{
+		WorkspaceChatID: chat.WorkspaceChatID,
+		DigestDate:      "2026-11-20",
+		PeriodStart:     1000,
+		PeriodEnd:       1999,
+		MessageCount:    12,
+		LastMessageID:   12,
+		Summary:         "Day 1 summary",
+		KeyDecisions:    []string{"Ship alpha"},
+		ActionItems:     []string{"Alice: QA"},
+		Topics:          []string{"alpha"},
+		Model:           "qwen2.5:7b",
+	}); err != nil {
+		t.Fatalf("upsert digest day 1: %v", err)
+	}
+	if err := s.UpsertDigest(ctx, DailyDigest{
+		WorkspaceChatID: chat.WorkspaceChatID,
+		DigestDate:      "2026-11-21",
+		PeriodStart:     2000,
+		PeriodEnd:       2999,
+		MessageCount:    8,
+		LastMessageID:   20,
+		Summary:         "Day 2 summary",
+		Model:           "qwen2.5:7b",
+	}); err != nil {
+		t.Fatalf("upsert digest day 2: %v", err)
+	}
+
+	// User 10 joined mid-way through Day 1 (t=1500).
+	_ = s.UpsertChatACL(ctx, ChatACL{
+		WorkspaceChatID: chat.WorkspaceChatID,
+		TelegramUserID:  10,
+		Status:          "member",
+		IsMember:        true,
+		JoinedAt:        int64Ptr(1500),
+		CheckedAt:       5000,
+	})
+
+	// Under full_history -> sees both digests.
+	all, err := s.GetDigests(ctx, DigestFilter{
+		TelegramUserID:       10,
+		WorkspaceChatID:      chat.WorkspaceChatID,
+		DefaultHistoryPolicy: config.HistoryPolicyFull,
+		MinACLCheckedAt:      4900,
+	})
+	if err != nil || len(all) != 2 {
+		t.Fatalf("expected 2 digests under full_history, got (%d, %v)", len(all), err)
+	}
+
+	// Under since_join -> Day 1 started at 1000 < 1500 so ONLY Day 2 is visible (no pre-join leak!).
+	since, err := s.GetDigests(ctx, DigestFilter{
+		TelegramUserID:       10,
+		WorkspaceChatID:      chat.WorkspaceChatID,
+		DefaultHistoryPolicy: config.HistoryPolicySinceJoin,
+		MinACLCheckedAt:      4900,
+	})
+	if err != nil || len(since) != 1 || since[0].DigestDate != "2026-11-21" {
+		t.Fatalf("expected only Day 2 under since_join, got %+v (err=%v)", since, err)
+	}
+
+	// Stale ACL (checked_at < MinACLCheckedAt) -> fail-closed (0 results).
+	stale, err := s.GetDigests(ctx, DigestFilter{
+		TelegramUserID:       10,
+		WorkspaceChatID:      chat.WorkspaceChatID,
+		DefaultHistoryPolicy: config.HistoryPolicyFull,
+		MinACLCheckedAt:      6000,
+	})
+	if err != nil || len(stale) != 0 {
+		t.Fatalf("expected 0 digests when ACL is stale, got (%d, %v)", len(stale), err)
+	}
+}

@@ -147,6 +147,30 @@ type getThreadInput struct {
 	Limit     int    `json:"limit,omitempty" jsonschema:"Max messages to return in the thread (default 100, max 200)"`
 }
 
+type getDigestsInput struct {
+	ChatID   string `json:"chat_id" jsonschema:"Workspace chat_id returned by list_chats"`
+	FromDate string `json:"from_date,omitempty" jsonschema:"Optional start calendar date (YYYY-MM-DD, inclusive)"`
+	ToDate   string `json:"to_date,omitempty" jsonschema:"Optional end calendar date (YYYY-MM-DD, inclusive)"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"Max daily digests to return (default 31, max 90)"`
+}
+
+type digestDTO struct {
+	ChatID       string   `json:"chat_id"`
+	Date         string   `json:"date"`
+	MessageCount int      `json:"message_count"`
+	Summary      string   `json:"untrusted_summary"`
+	KeyDecisions []string `json:"key_decisions,omitempty"`
+	ActionItems  []string `json:"action_items,omitempty"`
+	Topics       []string `json:"topics,omitempty"`
+	Model        string   `json:"model,omitempty"`
+}
+
+type digestsOutput struct {
+	UntrustedContentNotice string      `json:"untrusted_content_notice"`
+	Count                  int         `json:"count"`
+	Digests                []digestDTO `json:"digests"`
+}
+
 type messageDTO struct {
 	ChatID           string                  `json:"chat_id"`
 	MessageID        int64                   `json:"message_id"`
@@ -190,6 +214,12 @@ func (s *Server) registerTools() {
 		Description: "Reconstruct the full reply chain (parent root and all replies) around a specific message_id in an accessible Telegram chat.",
 		Annotations: readOnlyAnnotations("Get Reply Thread"),
 	}, s.toolGetThread)
+
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "get_digests",
+		Description: "Fetch precomputed nightly daily summaries (summary, key decisions, action items, topics) for an accessible Telegram chat over a date range. Use this first to quickly scan weeks of chat history before fetching raw messages.",
+		Annotations: readOnlyAnnotations("Get Nightly Chat Digests"),
+	}, s.toolGetDigests)
 }
 
 func (s *Server) toolListChats(ctx context.Context, _ *mcp.CallToolRequest, _ listChatsInput) (*mcp.CallToolResult, listChatsOutput, error) {
@@ -339,6 +369,79 @@ func (s *Server) toolGetThread(ctx context.Context, _ *mcp.CallToolRequest, in g
 	}
 
 	return nil, wrapMessages(msgs), nil
+}
+
+func (s *Server) toolGetDigests(ctx context.Context, _ *mcp.CallToolRequest, in getDigestsInput) (*mcp.CallToolResult, digestsOutput, error) {
+	userID, ok := UserIDFromContext(ctx)
+	if !ok {
+		return nil, digestsOutput{}, errors.New("unauthorized: missing authenticated user context")
+	}
+	if strings.TrimSpace(in.ChatID) == "" {
+		return nil, digestsOutput{}, errors.New("chat_id is required")
+	}
+
+	allowed, err := s.authorizer.CheckChatAccess(ctx, in.ChatID, userID)
+	if err != nil {
+		return nil, digestsOutput{}, fmt.Errorf("verify chat access: %w", err)
+	}
+	if !allowed {
+		return nil, digestsOutput{}, errors.New("forbidden: you do not have access to this chat")
+	}
+
+	fromDate, err := validateDateOnly(in.FromDate)
+	if err != nil {
+		return nil, digestsOutput{}, fmt.Errorf("invalid from_date: %w", err)
+	}
+	toDate, err := validateDateOnly(in.ToDate)
+	if err != nil {
+		return nil, digestsOutput{}, fmt.Errorf("invalid to_date: %w", err)
+	}
+
+	digests, err := s.store.GetDigests(ctx, storage.DigestFilter{
+		TelegramUserID:       userID,
+		WorkspaceChatID:      in.ChatID,
+		FromDate:             fromDate,
+		ToDate:               toDate,
+		DefaultHistoryPolicy: s.cfg.DefaultHistoryPolicy,
+		MinACLCheckedAt:      s.authorizer.MinFreshCheckedAt(),
+		Limit:                in.Limit,
+	})
+	if err != nil {
+		return nil, digestsOutput{}, fmt.Errorf("get digests: %w", err)
+	}
+
+	out := digestsOutput{
+		UntrustedContentNotice: untrustedContentNotice,
+		Count:                  len(digests),
+		Digests:                make([]digestDTO, 0, len(digests)),
+	}
+	for _, d := range digests {
+		out.Digests = append(out.Digests, digestDTO{
+			ChatID:       d.WorkspaceChatID,
+			Date:         d.DigestDate,
+			MessageCount: d.MessageCount,
+			Summary:      d.Summary,
+			KeyDecisions: d.KeyDecisions,
+			ActionItems:  d.ActionItems,
+			Topics:       d.Topics,
+			Model:        d.Model,
+		})
+	}
+	return nil, out, nil
+}
+
+func validateDateOnly(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return t.Format("2006-01-02"), nil
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC().Format("2006-01-02"), nil
+	}
+	return "", fmt.Errorf("expected YYYY-MM-DD, got %q", raw)
 }
 
 func wrapMessages(msgs []storage.Message) messagesOutput {

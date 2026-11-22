@@ -367,6 +367,23 @@ func (s *Store) MigrateChat(ctx context.Context, oldTelegramChatID, newTelegramC
 		}
 
 		if _, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO daily_digests (
+				workspace_chat_id, digest_date, period_start, period_end,
+				message_count, last_message_id, summary,
+				key_decisions, action_items, topics,
+				model, created_at, updated_at
+			)
+			SELECT
+				?, digest_date, period_start, period_end,
+				message_count, last_message_id, summary,
+				key_decisions, action_items, topics,
+				model, created_at, updated_at
+			FROM daily_digests WHERE workspace_chat_id = ?
+		`, targetWS, newWS); err != nil {
+			return "", fmt.Errorf("merge daily_digests: %w", err)
+		}
+
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE chat_id_aliases SET workspace_chat_id = ? WHERE workspace_chat_id = ?
 		`, targetWS, newWS); err != nil {
 			return "", fmt.Errorf("repoint aliases: %w", err)
@@ -962,7 +979,7 @@ func (s *Store) RevokeUserTokens(ctx context.Context, telegramUserID int64) (int
 	return res.RowsAffected()
 }
 
-// PurgeExpiredMessages deletes messages older than retentionDays relative to now.
+// PurgeExpiredMessages deletes messages and daily digests older than retentionDays relative to now.
 // FTS5 index entries are removed automatically via the messages_ad trigger.
 func (s *Store) PurgeExpiredMessages(ctx context.Context, retentionDays int, now time.Time) (int64, error) {
 	if retentionDays <= 0 {
@@ -972,6 +989,9 @@ func (s *Store) PurgeExpiredMessages(ctx context.Context, retentionDays int, now
 	res, err := s.db.ExecContext(ctx, `DELETE FROM messages WHERE created_at < ?`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("purge expired messages: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM daily_digests WHERE period_end < ?`, cutoff); err != nil {
+		return 0, fmt.Errorf("purge expired digests: %w", err)
 	}
 	return res.RowsAffected()
 }

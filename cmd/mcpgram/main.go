@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mytischi/mcpgram/internal/config"
+	"github.com/mytischi/mcpgram/internal/digest"
 	"github.com/mytischi/mcpgram/internal/importer"
 	"github.com/mytischi/mcpgram/internal/mcpserver"
 	"github.com/mytischi/mcpgram/internal/rbac"
@@ -21,7 +22,25 @@ import (
 	"github.com/mytischi/mcpgram/internal/telegram"
 )
 
-const version = "0.1.0"
+const version = "0.2.0-dev"
+
+type digestTriggerAdapter struct {
+	w *digest.Worker
+}
+
+func (a digestTriggerAdapter) Enabled() bool { return a.w.Enabled() }
+
+func (a digestTriggerAdapter) RunPending(ctx context.Context) (int, int, int, error) {
+	st, err := a.w.GeneratePending(ctx)
+	return st.Generated, st.Skipped, st.Failed, err
+}
+
+func (a digestTriggerAdapter) RunForDate(ctx context.Context, dateStr string, force bool) (int, int, int, error) {
+	st, err := a.w.GenerateAllForDate(ctx, dateStr, "", force)
+	return st.Generated, st.Skipped, st.Failed, err
+}
+
+func (a digestTriggerAdapter) TodayDate() string { return a.w.TodayDate() }
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -43,6 +62,8 @@ func run(args []string) error {
 		return runServe()
 	case "import":
 		return runImport(subArgs)
+	case "digest":
+		return runDigest(subArgs)
 	case "version", "--version", "-v":
 		fmt.Printf("mcpgram v%s\n", version)
 		return nil
@@ -59,8 +80,9 @@ func printUsage() {
 	fmt.Println(`mcpgram - Self-hosted Telegram Corporate MCP Server
 
 Usage:
-  mcpgram serve                         Run Telegram Long Polling ingestor + Streamable HTTP MCP server
+  mcpgram serve                         Run Telegram Long Polling ingestor + Streamable HTTP MCP server + nightly digests
   mcpgram import --file result.json     Import historical chat archive from Telegram Desktop JSON export
+  mcpgram digest [--date YYYY-MM-DD]    Generate daily chat digests on demand (requires DIGEST_MODE=openai_compatible)
   mcpgram version                       Print version`)
 }
 
@@ -77,6 +99,14 @@ func newLogger(level string) *slog.Logger {
 		lvl = slog.LevelInfo
 	}
 	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+}
+
+func newDigestWorker(store *storage.Store, cfg config.Config, logger *slog.Logger) (*digest.Worker, error) {
+	var summarizer digest.Summarizer
+	if cfg.DigestMode == config.DigestModeOpenAICompatible {
+		summarizer = digest.NewOpenAIClient(cfg.DigestBaseURL, cfg.DigestAPIKey, cfg.DigestModel)
+	}
+	return digest.NewWorker(store, summarizer, cfg, logger)
 }
 
 func runServe() error {
@@ -103,8 +133,15 @@ func runServe() error {
 		return fmt.Errorf("create telegram client: %w", err)
 	}
 
+	digestWorker, err := newDigestWorker(store, cfg, logger)
+	if err != nil {
+		return fmt.Errorf("create digest worker: %w", err)
+	}
+
 	authorizer := rbac.NewAuthorizer(store, tgClient, cfg.RBACCacheTTL, logger)
 	ingestor := telegram.NewIngestor(tgClient, store, cfg, authorizer, logger)
+	ingestor.SetDigestRunner(digestTriggerAdapter{w: digestWorker})
+
 	retentionWorker := retention.NewWorker(store, cfg.RetentionDays, time.Hour, logger)
 	mcpSrv := mcpserver.New(store, store, authorizer, cfg, logger)
 
@@ -114,7 +151,7 @@ func runServe() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 
 	go func() {
 		logger.Info("starting Telegram Long Polling ingestor")
@@ -130,11 +167,18 @@ func runServe() error {
 	}()
 
 	go func() {
+		if err := digestWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			errCh <- fmt.Errorf("digest worker stopped: %w", err)
+		}
+	}()
+
+	go func() {
 		logger.Info("starting Streamable HTTP MCP server",
 			"addr", cfg.ListenAddr,
 			"endpoint", "/mcp",
 			"default_history_policy", cfg.DefaultHistoryPolicy,
 			"retention_days", cfg.RetentionDays,
+			"digest_mode", cfg.DigestMode,
 		)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("http server stopped: %w", err)
@@ -205,5 +249,55 @@ func runImport(args []string) error {
 		stats.Imported, *ignoreTag, stats.IgnoredOffrec,
 		stats.SkippedOld, stats.SkippedNonMsg,
 	)
+	return nil
+}
+
+func runDigest(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	fs := flag.NewFlagSet("digest", flag.ContinueOnError)
+	dateStr := fs.String("date", "", "Generate digests for a specific calendar date YYYY-MM-DD (default: pending lookback days)")
+	today := fs.Bool("today", false, "Generate digests for today's messages so far")
+	chatID := fs.String("chat-id", "", "Optional workspace_chat_id to restrict generation to a single chat")
+	force := fs.Bool("force", false, "Regenerate even if an up-to-date digest already exists")
+	dbPath := fs.String("db", cfg.DatabasePath, "SQLite database path")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	logger := newLogger(cfg.LogLevel)
+	ctx := context.Background()
+	store, err := storage.Open(ctx, *dbPath)
+	if err != nil {
+		return fmt.Errorf("open storage: %w", err)
+	}
+	defer store.Close()
+
+	worker, err := newDigestWorker(store, cfg, logger)
+	if err != nil {
+		return err
+	}
+
+	var stats digest.RunStats
+	targetDate := *dateStr
+	if *today {
+		targetDate = worker.TodayDate()
+	}
+
+	if targetDate != "" {
+		stats, err = worker.GenerateAllForDate(ctx, targetDate, *chatID, *force)
+	} else {
+		stats, err = worker.GeneratePending(ctx)
+	}
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Digest run complete: generated=%d skipped=%d failed=%d\n",
+		stats.Generated, stats.Skipped, stats.Failed)
 	return nil
 }

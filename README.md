@@ -60,9 +60,32 @@ go build -o bin/mcpgram ./cmd/mcpgram
 |---|---|---|
 | `/start` | Anyone | Shows your numeric `Telegram ID` and available commands |
 | `/auth` | Corporate chat members & admins | Issues a personal Bearer token (revokes any previous token) |
-| `/status` | `ADMIN_TG_IDS` | Shows bot diagnostics, Privacy Mode status, and tracked chats (`ws=...`) |
+| `/status` | `ADMIN_TG_IDS` | Shows bot diagnostics, Privacy Mode status, digest status, and tracked chats (`ws=...`) |
+| `/digest [YYYY-MM-DD\|today]` | `ADMIN_TG_IDS` | Triggers nightly digest generation on demand (pending days or a specific date) |
 | `/set_policy <ws_id> <full_history\|since_join\|default>` | `ADMIN_TG_IDS` | Sets or resets per-chat history visibility override |
 | `/revoke_user <telegram_user_id>` | `ADMIN_TG_IDS` | Immediately revokes all active tokens for a user |
+
+## Nightly Chat Digests (`get_digests`)
+
+To let AI agents scan weeks of chat history cheaply without pulling raw logs, enable nightly digests in `.env` using any OpenAI-compatible LLM endpoint (local Ollama, llama.cpp, vLLM, or OpenAI):
+
+```env
+DIGEST_MODE=openai_compatible
+DIGEST_BASE_URL=http://127.0.0.1:11434/v1
+DIGEST_API_KEY=
+DIGEST_MODEL=qwen2.5:7b
+DIGEST_SCHEDULE_HOUR=3
+DIGEST_TIMEZONE=Europe/Moscow
+DIGEST_MIN_MESSAGES=3
+DIGEST_LOOKBACK_DAYS=7
+```
+
+You can also trigger digest generation manually via CLI or `/digest` in Telegram:
+
+```bash
+./bin/mcpgram digest                 # generate missing digests for the last DIGEST_LOOKBACK_DAYS days
+./bin/mcpgram digest --today --force # summarize today's messages immediately
+```
 
 ## Import Historical Archive (Telegram Desktop JSON)
 
@@ -77,6 +100,7 @@ Export chat history to JSON in Telegram Desktop (`result.json`) and run:
 ## MCP Tools (Read-Only)
 
 - `list_chats` — accessible corporate chats, Forum Topics, and last message timestamp.
+- `get_digests` — precomputed nightly daily summaries (overview, key decisions, action items, topics) over a date range.
 - `search_messages` — RBAC-filtered FTS5 search across accessible chats or a specific chat/topic.
 - `get_messages` — chronological messages filtered by date range, topic, and author.
 - `get_thread` — full reply chain reconstruction around a `message_id`.

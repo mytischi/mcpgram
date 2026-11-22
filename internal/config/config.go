@@ -25,6 +25,19 @@ func (p HistoryPolicy) Valid() bool {
 	return p == HistoryPolicyFull || p == HistoryPolicySinceJoin
 }
 
+// DigestMode controls nightly chat digest generation.
+type DigestMode string
+
+const (
+	DigestModeOff              DigestMode = "off"
+	DigestModeOpenAICompatible DigestMode = "openai_compatible"
+)
+
+// Valid reports whether m is a supported DigestMode value.
+func (m DigestMode) Valid() bool {
+	return m == DigestModeOff || m == DigestModeOpenAICompatible
+}
+
 // Config holds validated runtime configuration for mcpgram.
 type Config struct {
 	BotToken             string
@@ -39,6 +52,16 @@ type Config struct {
 	IgnoreTag            string
 	TelegramProxyURL     string
 	LogLevel             string
+
+	// Nightly digests (v0.2)
+	DigestMode         DigestMode
+	DigestBaseURL      string
+	DigestAPIKey       string
+	DigestModel        string
+	DigestScheduleHour int
+	DigestTimezone     string
+	DigestMinMessages  int
+	DigestLookbackDays int
 }
 
 // Load reads optional .env files (if they exist) and parses environment variables.
@@ -151,6 +174,56 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 
 	if cfg.DatabasePath == "" {
 		return Config{}, errors.New("DATABASE_URL must not be empty")
+	}
+
+	// Nightly digest settings
+	digestMode := DigestMode(strings.ToLower(get("DIGEST_MODE", string(DigestModeOff))))
+	if !digestMode.Valid() {
+		return Config{}, fmt.Errorf("invalid DIGEST_MODE %q: must be %q or %q",
+			digestMode, DigestModeOff, DigestModeOpenAICompatible)
+	}
+	cfg.DigestMode = digestMode
+	cfg.DigestBaseURL = strings.TrimRight(get("DIGEST_BASE_URL", ""), "/")
+	cfg.DigestAPIKey = get("DIGEST_API_KEY", "")
+	cfg.DigestModel = get("DIGEST_MODEL", "")
+
+	scheduleHourRaw := get("DIGEST_SCHEDULE_HOUR", "3")
+	scheduleHour, err := strconv.Atoi(scheduleHourRaw)
+	if err != nil || scheduleHour < 0 || scheduleHour > 23 {
+		return Config{}, fmt.Errorf("invalid DIGEST_SCHEDULE_HOUR %q: must be 0..23", scheduleHourRaw)
+	}
+	cfg.DigestScheduleHour = scheduleHour
+
+	cfg.DigestTimezone = get("DIGEST_TIMEZONE", "UTC")
+	if _, err := time.LoadLocation(cfg.DigestTimezone); err != nil {
+		return Config{}, fmt.Errorf("invalid DIGEST_TIMEZONE %q: %w", cfg.DigestTimezone, err)
+	}
+
+	minMsgsRaw := get("DIGEST_MIN_MESSAGES", "3")
+	minMsgs, err := strconv.Atoi(minMsgsRaw)
+	if err != nil || minMsgs < 1 {
+		return Config{}, fmt.Errorf("invalid DIGEST_MIN_MESSAGES %q: must be >= 1", minMsgsRaw)
+	}
+	cfg.DigestMinMessages = minMsgs
+
+	lookbackRaw := get("DIGEST_LOOKBACK_DAYS", "7")
+	lookback, err := strconv.Atoi(lookbackRaw)
+	if err != nil || lookback < 1 {
+		return Config{}, fmt.Errorf("invalid DIGEST_LOOKBACK_DAYS %q: must be >= 1", lookbackRaw)
+	}
+	cfg.DigestLookbackDays = lookback
+
+	if cfg.DigestMode == DigestModeOpenAICompatible {
+		if cfg.DigestBaseURL == "" {
+			return Config{}, errors.New("DIGEST_BASE_URL is required when DIGEST_MODE=openai_compatible")
+		}
+		u, err := url.Parse(cfg.DigestBaseURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return Config{}, fmt.Errorf("invalid DIGEST_BASE_URL %q: must be http(s) URL", cfg.DigestBaseURL)
+		}
+		if cfg.DigestModel == "" {
+			return Config{}, errors.New("DIGEST_MODEL is required when DIGEST_MODE=openai_compatible")
+		}
 	}
 
 	return cfg, nil

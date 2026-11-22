@@ -328,4 +328,21 @@ func TestIngestorPrivateCommands(t *testing.T) {
 	if err != nil || updated.HistoryPolicyOverride != nil {
 		t.Fatalf("expected nil override after reset, got %+v (err=%v)", updated.HistoryPolicyOverride, err)
 	}
+
+	// 7. Admin /digest when disabled returns helpful notice.
+	if err := ing.HandleUpdate(ctx, Update{
+		UpdateID: 8,
+		Message: &Message{
+			MessageID: 8,
+			Chat:      Chat{ID: 1000, Type: "private"},
+			From:      &User{ID: 1000},
+			Text:      "/digest",
+		},
+	}); err != nil {
+		t.Fatalf("admin /digest disabled: %v", err)
+	}
+	lastMsg := api.sentMessages[len(api.sentMessages)-1].text
+	if !strings.Contains(lastMsg, "DIGEST_MODE=openai_compatible") {
+		t.Fatalf("expected disabled digest hint, got %q", lastMsg)
+	}
 }
