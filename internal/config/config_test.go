@@ -105,6 +105,7 @@ func TestLoadDigestConfig(t *testing.T) {
 		"DIGEST_MODE":          "openai_compatible",
 		"DIGEST_BASE_URL":      "http://127.0.0.1:11434/v1/",
 		"DIGEST_MODEL":         "qwen2.5:7b",
+		"DIGEST_LANGUAGE":      "ru",
 		"DIGEST_SCHEDULE_HOUR": "4",
 		"DIGEST_TIMEZONE":      "Europe/Moscow",
 		"DIGEST_MIN_MESSAGES":  "5",
@@ -113,7 +114,7 @@ func TestLoadDigestConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.DigestMode != DigestModeOpenAICompatible || cfg.DigestBaseURL != "http://127.0.0.1:11434/v1" {
+	if cfg.DigestMode != DigestModeOpenAICompatible || cfg.DigestBaseURL != "http://127.0.0.1:11434/v1" || cfg.DigestLanguage != "ru" {
 		t.Fatalf("unexpected digest config: %+v", cfg)
 	}
 	if cfg.DigestScheduleHour != 4 || cfg.DigestTimezone != "Europe/Moscow" || cfg.DigestMinMessages != 5 || cfg.DigestLookbackDays != 14 {

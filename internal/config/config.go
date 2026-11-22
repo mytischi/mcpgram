@@ -84,6 +84,7 @@ type Config struct {
 	DigestBaseURL      string
 	DigestAPIKey       string
 	DigestModel        string
+	DigestLanguage     string
 	DigestScheduleHour int
 	DigestTimezone     string
 	DigestMinMessages  int
@@ -230,6 +231,7 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	cfg.DigestBaseURL = strings.TrimRight(get("DIGEST_BASE_URL", ""), "/")
 	cfg.DigestAPIKey = get("DIGEST_API_KEY", "")
 	cfg.DigestModel = get("DIGEST_MODEL", "")
+	cfg.DigestLanguage = get("DIGEST_LANGUAGE", "")
 
 	scheduleHourRaw := get("DIGEST_SCHEDULE_HOUR", "3")
 	scheduleHour, err := strconv.Atoi(scheduleHourRaw)

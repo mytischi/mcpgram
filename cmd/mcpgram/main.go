@@ -109,7 +109,7 @@ func newLogger(level string) *slog.Logger {
 func newDigestWorker(store *storage.Store, cfg config.Config, logger *slog.Logger) (*digest.Worker, error) {
 	var summarizer digest.Summarizer
 	if cfg.DigestMode == config.DigestModeOpenAICompatible {
-		summarizer = digest.NewOpenAIClient(cfg.DigestBaseURL, cfg.DigestAPIKey, cfg.DigestModel)
+		summarizer = digest.NewOpenAIClient(cfg.DigestBaseURL, cfg.DigestAPIKey, cfg.DigestModel, cfg.DigestLanguage)
 	}
 	return digest.NewWorker(store, summarizer, cfg, logger)
 }
