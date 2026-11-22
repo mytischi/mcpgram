@@ -258,3 +258,11 @@ type BotCommand struct {
 	Command     string `json:"command"`
 	Description string `json:"description"`
 }
+
+// File represents a file ready to be downloaded via Telegram Bot API getFile.
+type File struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	FileSize     int64  `json:"file_size,omitempty"`
+	FilePath     string `json:"file_path,omitempty"`
+}

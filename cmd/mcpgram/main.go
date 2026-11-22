@@ -18,11 +18,13 @@ import (
 	"github.com/mytischi/mcpgram/internal/mcpserver"
 	"github.com/mytischi/mcpgram/internal/rbac"
 	"github.com/mytischi/mcpgram/internal/retention"
+	"github.com/mytischi/mcpgram/internal/semantic"
 	"github.com/mytischi/mcpgram/internal/storage"
 	"github.com/mytischi/mcpgram/internal/telegram"
+	"github.com/mytischi/mcpgram/internal/whisper"
 )
 
-const version = "0.2.0-dev"
+const version = "0.2.0"
 
 type digestTriggerAdapter struct {
 	w *digest.Worker
@@ -64,6 +66,8 @@ func run(args []string) error {
 		return runImport(subArgs)
 	case "digest":
 		return runDigest(subArgs)
+	case "reindex":
+		return runReindex(subArgs)
 	case "version", "--version", "-v":
 		fmt.Printf("mcpgram v%s\n", version)
 		return nil
@@ -80,9 +84,10 @@ func printUsage() {
 	fmt.Println(`mcpgram - Self-hosted Telegram Corporate MCP Server
 
 Usage:
-  mcpgram serve                         Run Telegram Long Polling ingestor + Streamable HTTP MCP server + nightly digests
+  mcpgram serve                         Run Telegram ingestor + Streamable HTTP MCP server + optional workers (digests, semantic, whisper)
   mcpgram import --file result.json     Import historical chat archive from Telegram Desktop JSON export
   mcpgram digest [--date YYYY-MM-DD]    Generate daily chat digests on demand (requires DIGEST_MODE=openai_compatible)
+  mcpgram reindex                       Build/update semantic dialog chunk embeddings (requires EMBEDDING_MODE=openai_compatible)
   mcpgram version                       Print version`)
 }
 
@@ -107,6 +112,21 @@ func newDigestWorker(store *storage.Store, cfg config.Config, logger *slog.Logge
 		summarizer = digest.NewOpenAIClient(cfg.DigestBaseURL, cfg.DigestAPIKey, cfg.DigestModel)
 	}
 	return digest.NewWorker(store, summarizer, cfg, logger)
+}
+
+func newEmbedder(cfg config.Config) semantic.Embedder {
+	if cfg.EmbeddingMode == config.EmbeddingModeOpenAICompatible {
+		return semantic.NewOpenAIEmbedder(cfg.EmbeddingBaseURL, cfg.EmbeddingAPIKey, cfg.EmbeddingModel)
+	}
+	return nil
+}
+
+func newWhisperWorker(store *storage.Store, fetcher whisper.FileFetcher, cfg config.Config, logger *slog.Logger) *whisper.Worker {
+	var tr whisper.Transcriber
+	if cfg.WhisperMode == config.WhisperModeOpenAICompatible {
+		tr = whisper.NewOpenAIClient(cfg.WhisperBaseURL, cfg.WhisperAPIKey, cfg.WhisperModel, cfg.WhisperLanguage)
+	}
+	return whisper.NewWorker(store, fetcher, tr, cfg, logger)
 }
 
 func runServe() error {
@@ -138,12 +158,17 @@ func runServe() error {
 		return fmt.Errorf("create digest worker: %w", err)
 	}
 
+	embedder := newEmbedder(cfg)
+	semanticIndexer := semantic.NewIndexer(store, embedder, cfg, logger)
+	searcher := semantic.NewHybridSearcher(store, embedder, logger)
+	whisperWorker := newWhisperWorker(store, tgClient, cfg, logger)
+
 	authorizer := rbac.NewAuthorizer(store, tgClient, cfg.RBACCacheTTL, logger)
 	ingestor := telegram.NewIngestor(tgClient, store, cfg, authorizer, logger)
 	ingestor.SetDigestRunner(digestTriggerAdapter{w: digestWorker})
 
 	retentionWorker := retention.NewWorker(store, cfg.RetentionDays, time.Hour, logger)
-	mcpSrv := mcpserver.New(store, store, authorizer, cfg, logger)
+	mcpSrv := mcpserver.New(store, searcher, authorizer, cfg, logger)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -151,7 +176,7 @@ func runServe() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 6)
 
 	go func() {
 		logger.Info("starting Telegram Long Polling ingestor")
@@ -173,12 +198,26 @@ func runServe() error {
 	}()
 
 	go func() {
+		if err := semanticIndexer.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			errCh <- fmt.Errorf("semantic indexer stopped: %w", err)
+		}
+	}()
+
+	go func() {
+		if err := whisperWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			errCh <- fmt.Errorf("whisper worker stopped: %w", err)
+		}
+	}()
+
+	go func() {
 		logger.Info("starting Streamable HTTP MCP server",
 			"addr", cfg.ListenAddr,
 			"endpoint", "/mcp",
 			"default_history_policy", cfg.DefaultHistoryPolicy,
 			"retention_days", cfg.RetentionDays,
 			"digest_mode", cfg.DigestMode,
+			"embedding_mode", cfg.EmbeddingMode,
+			"whisper_mode", cfg.WhisperMode,
 		)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("http server stopped: %w", err)
@@ -299,5 +338,36 @@ func runDigest(args []string) error {
 
 	fmt.Printf("Digest run complete: generated=%d skipped=%d failed=%d\n",
 		stats.Generated, stats.Skipped, stats.Failed)
+	return nil
+}
+
+func runReindex(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	fs := flag.NewFlagSet("reindex", flag.ContinueOnError)
+	dbPath := fs.String("db", cfg.DatabasePath, "SQLite database path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	logger := newLogger(cfg.LogLevel)
+	ctx := context.Background()
+	store, err := storage.Open(ctx, *dbPath)
+	if err != nil {
+		return fmt.Errorf("open storage: %w", err)
+	}
+	defer store.Close()
+
+	indexer := semantic.NewIndexer(store, newEmbedder(cfg), cfg, logger)
+	stats, err := indexer.IndexAll(ctx)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Semantic reindex complete: chats=%d indexed=%d skipped=%d failed=%d\n",
+		stats.ChatsScanned, stats.Indexed, stats.Skipped, stats.Failed)
 	return nil
 }

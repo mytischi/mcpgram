@@ -193,6 +193,53 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) err
 	return c.call(ctx, c.apiClient, "sendMessage", payload, &out)
 }
 
+// GetFile resolves a Telegram file_id into a downloadable file_path.
+func (c *Client) GetFile(ctx context.Context, fileID string) (File, error) {
+	payload := map[string]any{
+		"file_id": fileID,
+	}
+	var out File
+	err := c.call(ctx, c.apiClient, "getFile", payload, &out)
+	return out, err
+}
+
+// DownloadFile downloads a Telegram file strictly from the configured Bot API file endpoint,
+// guarding against SSRF, path traversal, and oversized responses.
+func (c *Client) DownloadFile(ctx context.Context, filePath string, maxBytes int64) ([]byte, error) {
+	clean := strings.TrimSpace(filePath)
+	if clean == "" || strings.HasPrefix(clean, "/") || strings.Contains(clean, "..") || strings.Contains(clean, "://") {
+		return nil, fmt.Errorf("invalid telegram file_path %q", filePath)
+	}
+	if maxBytes <= 0 {
+		maxBytes = 20 << 20 // 20 MiB
+	}
+
+	endpoint := fmt.Sprintf("%s/file/bot%s/%s", c.baseURL, c.token, clean)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, c.redactErr(fmt.Errorf("build download request: %w", err))
+	}
+
+	resp, err := c.pollClient.Do(req)
+	if err != nil {
+		return nil, c.redactErr(fmt.Errorf("download telegram file: %w", err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download telegram file failed with http %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read telegram file: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("telegram file exceeds max allowed size (%d bytes)", maxBytes)
+	}
+	return data, nil
+}
+
 func (c *Client) call(ctx context.Context, httpClient *http.Client, method string, payload any, result any) error {
 	endpoint := fmt.Sprintf("%s/bot%s/%s", c.baseURL, c.token, method)
 

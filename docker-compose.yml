@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     image: ghcr.io/mytischi/mcpgram:latest
     container_name: mcpgram
-    profiles: ["lite"]
+    profiles: ["lite", "pro"]
     restart: unless-stopped
     env_file:
       - .env
@@ -23,5 +23,32 @@ services:
       retries: 3
       start_period: 10s
 
+  # Local OpenAI-compatible LLM + Embeddings sidecar (Ollama) for profile "pro"
+  # After startup, pull your chosen models once:
+  #   docker compose exec ollama ollama pull bge-m3
+  #   docker compose exec ollama ollama pull qwen2.5:7b
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mcpgram-ollama
+    profiles: ["pro"]
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+
+  # Local OpenAI-compatible Whisper transcription sidecar (CPU) for profile "pro"
+  # Set in .env:
+  #   WHISPER_MODE=openai_compatible
+  #   WHISPER_BASE_URL=http://whisper:8000/v1
+  #   WHISPER_MODEL=Systran/faster-whisper-small
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cpu
+    container_name: mcpgram-whisper
+    profiles: ["pro"]
+    restart: unless-stopped
+    volumes:
+      - whisper_cache:/root/.cache/huggingface
+
 volumes:
   mcpgram_data:
+  ollama_data:
+  whisper_cache:

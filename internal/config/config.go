@@ -38,6 +38,32 @@ func (m DigestMode) Valid() bool {
 	return m == DigestModeOff || m == DigestModeOpenAICompatible
 }
 
+// EmbeddingMode controls local/OpenAI-compatible semantic search indexing.
+type EmbeddingMode string
+
+const (
+	EmbeddingModeOff              EmbeddingMode = "off"
+	EmbeddingModeOpenAICompatible EmbeddingMode = "openai_compatible"
+)
+
+// Valid reports whether m is a supported EmbeddingMode value.
+func (m EmbeddingMode) Valid() bool {
+	return m == EmbeddingModeOff || m == EmbeddingModeOpenAICompatible
+}
+
+// WhisperMode controls background voice & video_note transcription.
+type WhisperMode string
+
+const (
+	WhisperModeOff              WhisperMode = "off"
+	WhisperModeOpenAICompatible WhisperMode = "openai_compatible"
+)
+
+// Valid reports whether m is a supported WhisperMode value.
+func (m WhisperMode) Valid() bool {
+	return m == WhisperModeOff || m == WhisperModeOpenAICompatible
+}
+
 // Config holds validated runtime configuration for mcpgram.
 type Config struct {
 	BotToken             string
@@ -62,6 +88,24 @@ type Config struct {
 	DigestTimezone     string
 	DigestMinMessages  int
 	DigestLookbackDays int
+
+	// Hybrid semantic search (v0.2)
+	EmbeddingMode            EmbeddingMode
+	EmbeddingBaseURL         string
+	EmbeddingAPIKey          string
+	EmbeddingModel           string
+	EmbeddingChunkWindowSec  int
+	EmbeddingChunkMaxMsgs    int
+	EmbeddingPollInterval    time.Duration
+
+	// Voice / video_note transcription (v0.2)
+	WhisperMode         WhisperMode
+	WhisperBaseURL      string
+	WhisperAPIKey       string
+	WhisperModel        string
+	WhisperLanguage     string
+	WhisperPollInterval time.Duration
+	WhisperMaxFileBytes int64
 }
 
 // Load reads optional .env files (if they exist) and parses environment variables.
@@ -223,6 +267,90 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 		}
 		if cfg.DigestModel == "" {
 			return Config{}, errors.New("DIGEST_MODEL is required when DIGEST_MODE=openai_compatible")
+		}
+	}
+
+	// Hybrid semantic search settings
+	embMode := EmbeddingMode(strings.ToLower(get("EMBEDDING_MODE", string(EmbeddingModeOff))))
+	if !embMode.Valid() {
+		return Config{}, fmt.Errorf("invalid EMBEDDING_MODE %q: must be %q or %q",
+			embMode, EmbeddingModeOff, EmbeddingModeOpenAICompatible)
+	}
+	cfg.EmbeddingMode = embMode
+	cfg.EmbeddingBaseURL = strings.TrimRight(get("EMBEDDING_BASE_URL", ""), "/")
+	cfg.EmbeddingAPIKey = get("EMBEDDING_API_KEY", "")
+	cfg.EmbeddingModel = get("EMBEDDING_MODEL", "")
+
+	chunkWinRaw := get("EMBEDDING_CHUNK_WINDOW_SEC", "600")
+	chunkWin, err := strconv.Atoi(chunkWinRaw)
+	if err != nil || chunkWin <= 0 {
+		return Config{}, fmt.Errorf("invalid EMBEDDING_CHUNK_WINDOW_SEC %q: must be > 0", chunkWinRaw)
+	}
+	cfg.EmbeddingChunkWindowSec = chunkWin
+
+	chunkMaxRaw := get("EMBEDDING_CHUNK_MAX_MESSAGES", "8")
+	chunkMax, err := strconv.Atoi(chunkMaxRaw)
+	if err != nil || chunkMax <= 0 {
+		return Config{}, fmt.Errorf("invalid EMBEDDING_CHUNK_MAX_MESSAGES %q: must be > 0", chunkMaxRaw)
+	}
+	cfg.EmbeddingChunkMaxMsgs = chunkMax
+
+	embPollRaw := get("EMBEDDING_POLL_INTERVAL", "2m")
+	embPoll, err := time.ParseDuration(embPollRaw)
+	if err != nil || embPoll <= 0 {
+		return Config{}, fmt.Errorf("invalid EMBEDDING_POLL_INTERVAL %q: must be positive Go duration", embPollRaw)
+	}
+	cfg.EmbeddingPollInterval = embPoll
+
+	if cfg.EmbeddingMode == EmbeddingModeOpenAICompatible {
+		if cfg.EmbeddingBaseURL == "" {
+			return Config{}, errors.New("EMBEDDING_BASE_URL is required when EMBEDDING_MODE=openai_compatible")
+		}
+		u, err := url.Parse(cfg.EmbeddingBaseURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return Config{}, fmt.Errorf("invalid EMBEDDING_BASE_URL %q: must be http(s) URL", cfg.EmbeddingBaseURL)
+		}
+		if cfg.EmbeddingModel == "" {
+			return Config{}, errors.New("EMBEDDING_MODEL is required when EMBEDDING_MODE=openai_compatible")
+		}
+	}
+
+	// Whisper transcription settings
+	whisperMode := WhisperMode(strings.ToLower(get("WHISPER_MODE", string(WhisperModeOff))))
+	if !whisperMode.Valid() {
+		return Config{}, fmt.Errorf("invalid WHISPER_MODE %q: must be %q or %q",
+			whisperMode, WhisperModeOff, WhisperModeOpenAICompatible)
+	}
+	cfg.WhisperMode = whisperMode
+	cfg.WhisperBaseURL = strings.TrimRight(get("WHISPER_BASE_URL", ""), "/")
+	cfg.WhisperAPIKey = get("WHISPER_API_KEY", "")
+	cfg.WhisperModel = get("WHISPER_MODEL", "whisper-1")
+	cfg.WhisperLanguage = get("WHISPER_LANGUAGE", "")
+
+	whisperPollRaw := get("WHISPER_POLL_INTERVAL", "30s")
+	whisperPoll, err := time.ParseDuration(whisperPollRaw)
+	if err != nil || whisperPoll <= 0 {
+		return Config{}, fmt.Errorf("invalid WHISPER_POLL_INTERVAL %q: must be positive Go duration", whisperPollRaw)
+	}
+	cfg.WhisperPollInterval = whisperPoll
+
+	whisperMaxRaw := get("WHISPER_MAX_FILE_BYTES", "20971520") // 20 MiB (Bot API getFile limit)
+	whisperMax, err := strconv.ParseInt(whisperMaxRaw, 10, 64)
+	if err != nil || whisperMax <= 0 {
+		return Config{}, fmt.Errorf("invalid WHISPER_MAX_FILE_BYTES %q: must be > 0", whisperMaxRaw)
+	}
+	cfg.WhisperMaxFileBytes = whisperMax
+
+	if cfg.WhisperMode == WhisperModeOpenAICompatible {
+		if cfg.WhisperBaseURL == "" {
+			return Config{}, errors.New("WHISPER_BASE_URL is required when WHISPER_MODE=openai_compatible")
+		}
+		u, err := url.Parse(cfg.WhisperBaseURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return Config{}, fmt.Errorf("invalid WHISPER_BASE_URL %q: must be http(s) URL", cfg.WhisperBaseURL)
+		}
+		if cfg.WhisperModel == "" {
+			return Config{}, errors.New("WHISPER_MODEL is required when WHISPER_MODE=openai_compatible")
 		}
 	}
 

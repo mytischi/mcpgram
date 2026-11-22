@@ -87,6 +87,27 @@ You can also trigger digest generation manually via CLI or `/digest` in Telegram
 ./bin/mcpgram digest --today --force # summarize today's messages immediately
 ```
 
+## Hybrid Semantic Search (`EMBEDDING_MODE`) & Whisper (`WHISPER_MODE`)
+
+In `lite` mode both are `off` (zero ML overhead, pure SQLite FTS5). To enable fully local semantic search (dialog window chunking + RBAC pre-filtered vector RRF fusion) and voice/video_note transcription, enable the `pro` Compose profile (includes local Ollama + `faster-whisper-server` sidecars) and configure `.env`:
+
+```env
+EMBEDDING_MODE=openai_compatible
+EMBEDDING_BASE_URL=http://ollama:11434/v1
+EMBEDDING_MODEL=bge-m3
+
+WHISPER_MODE=openai_compatible
+WHISPER_BASE_URL=http://whisper:8000/v1
+WHISPER_MODEL=Systran/faster-whisper-small
+WHISPER_LANGUAGE=ru
+```
+
+```bash
+docker compose --profile pro up -d
+# Optional manual semantic indexing after importing old archives:
+./bin/mcpgram reindex
+```
+
 ## Import Historical Archive (Telegram Desktop JSON)
 
 Export chat history to JSON in Telegram Desktop (`result.json`) and run:

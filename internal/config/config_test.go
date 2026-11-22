@@ -84,6 +84,11 @@ func TestLoadValidationErrors(t *testing.T) {
 		{"digest missing model", map[string]string{"DIGEST_MODE": "openai_compatible", "DIGEST_BASE_URL": "http://127.0.0.1:11434/v1"}},
 		{"digest bad hour", map[string]string{"DIGEST_SCHEDULE_HOUR": "25"}},
 		{"digest bad timezone", map[string]string{"DIGEST_TIMEZONE": "Mars/Olympus"}},
+		{"invalid embedding mode", map[string]string{"EMBEDDING_MODE": "magic"}},
+		{"embedding missing base url", map[string]string{"EMBEDDING_MODE": "openai_compatible", "EMBEDDING_MODEL": "bge-m3"}},
+		{"embedding missing model", map[string]string{"EMBEDDING_MODE": "openai_compatible", "EMBEDDING_BASE_URL": "http://127.0.0.1:11434/v1"}},
+		{"invalid whisper mode", map[string]string{"WHISPER_MODE": "magic"}},
+		{"whisper missing base url", map[string]string{"WHISPER_MODE": "openai_compatible"}},
 	}
 
 	for _, tc := range cases {

@@ -538,8 +538,18 @@ func (i *Ingestor) cmdStatus(ctx context.Context, chatID, userID int64) error {
 	if i.cfg.DigestMode == config.DigestModeOpenAICompatible {
 		digestLabel = fmt.Sprintf("включены (%s, %02d:00 %s)", i.cfg.DigestModel, i.cfg.DigestScheduleHour, i.cfg.DigestTimezone)
 	}
+	embLabel := "выкл (только FTS5)"
+	if i.cfg.EmbeddingMode == config.EmbeddingModeOpenAICompatible {
+		embLabel = fmt.Sprintf("гибридный FTS5 + Vector (%s)", i.cfg.EmbeddingModel)
+	}
+	whisperLabel := "выкл (WHISPER_MODE=off)"
+	if i.cfg.WhisperMode == config.WhisperModeOpenAICompatible {
+		whisperLabel = fmt.Sprintf("вкл (%s)", i.cfg.WhisperModel)
+	}
 	fmt.Fprintf(&b, "• Retention: %s | Ignore tag: %s\n", retentionLabel, i.cfg.IgnoreTag)
 	fmt.Fprintf(&b, "• Ночные дайджесты: %s\n", digestLabel)
+	fmt.Fprintf(&b, "• Поиск: %s\n", embLabel)
+	fmt.Fprintf(&b, "• Whisper (голосовые): %s\n", whisperLabel)
 	fmt.Fprintf(&b, "• Отслеживаемых чатов: %d\n", len(chats))
 
 	for _, c := range chats {
