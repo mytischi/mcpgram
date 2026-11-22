@@ -113,11 +113,11 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	}
 	cfg.RetentionDays = retention
 
-	// Token TTL days
+	// Token TTL days (0 = never expire until explicitly revoked; default 90)
 	tokenTTLRaw := get("TOKEN_TTL_DAYS", "90")
 	tokenTTL, err := strconv.Atoi(tokenTTLRaw)
-	if err != nil || tokenTTL <= 0 {
-		return Config{}, fmt.Errorf("invalid TOKEN_TTL_DAYS %q: must be > 0", tokenTTLRaw)
+	if err != nil || tokenTTL < 0 {
+		return Config{}, fmt.Errorf("invalid TOKEN_TTL_DAYS %q: must be >= 0", tokenTTLRaw)
 	}
 	cfg.TokenTTLDays = tokenTTL
 

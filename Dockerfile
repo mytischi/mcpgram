@@ -1,6 +1,7 @@
 # Multi-stage, CGO-free multi-arch build (linux/amd64 + linux/arm64)
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
+ENV GOTOOLCHAIN=auto
 WORKDIR /src
 
 COPY go.mod go.sum ./

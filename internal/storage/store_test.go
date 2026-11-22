@@ -416,6 +416,15 @@ func TestAuthTokensLifecycle(t *testing.T) {
 	if _, err := s.ValidateAuthToken(ctx, tok2, time.Now()); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected revoked tok2 to fail, got %v", err)
 	}
+
+	// Non-expiring token (ttl == 0) remains valid far in the future until revoked.
+	tokForever, recForever, err := s.IssueAuthToken(ctx, 42, 0)
+	if err != nil || recForever.ExpiresAt != 0 {
+		t.Fatalf("issue non-expiring token: (%+v, %v)", recForever, err)
+	}
+	if uid, err := s.ValidateAuthToken(ctx, tokForever, time.Now().Add(10*365*24*time.Hour)); err != nil || uid != 42 {
+		t.Fatalf("expected non-expiring token to stay valid, got (%d, %v)", uid, err)
+	}
 }
 
 func TestBuildFTSQueryPunctuationSafety(t *testing.T) {

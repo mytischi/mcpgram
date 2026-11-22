@@ -10,44 +10,36 @@ Allows employees to safely connect their AI agents (Cursor, Claude Desktop, Open
 - **Telegram as Source of Truth (RBAC):** users can query only the chats where they are active members (hybrid `chat_member` push + TTL-bounded live `getChatMember` verification, fail-closed on network errors).
 - **Read-Only MCP:** no send/write/delete tools exposed to LLMs; bearer tokens live in the MCP client config, never in LLM prompts.
 - **Long Polling only:** no public IP, domain, or inbound webhooks required; optional HTTP/SOCKS5 `TELEGRAM_PROXY_URL`.
-- **Configurable history policy:** `DEFAULT_HISTORY_POLICY=full_history` by default (access full chat archive), switchable to `since_join` globally or per chat.
-
-## v0.1 MVP Status
-
-- [x] Stage 0: Repository scaffold, Go module, configuration & validation
-- [x] Stage 1: SQLite WAL + FTS5 storage layer, migrations, group migration handling, `#offrecord`, TTL retention, RBAC SQL queries & unit tests
-- [x] Stage 2: Telegram Bot API client, Long Polling ingestor & bot commands (`/auth`, `/status`, `/revoke_user`)
-- [x] Stage 3: Hybrid RBAC authorizer (`chat_member` + TTL `getChatMember` + fail-closed SQL freshness)
-- [x] Stage 4: Streamable HTTP MCP server (`/mcp`, `/healthz`, Bearer auth, `list_chats`, `search_messages`, `get_messages`, `get_thread`, background TTL retention)
-- [x] Stage 5: Telegram Desktop JSON (`result.json`) importer & Docker packaging (`lite` profile)
+- **Configurable history & retention policies:** `DEFAULT_HISTORY_POLICY=full_history` (or `since_join`, plus per-chat `/set_policy`), `RETENTION_DAYS=0` (keep forever by default), and `TOKEN_TTL_DAYS=90` (`0` for non-expiring tokens until revoked).
 
 ## Quick Start
 
-### 1. Configure `.env`
+### Option A: Docker Compose (`lite` profile, prebuilt multi-arch GHCR image)
+
+```bash
+curl -O https://raw.githubusercontent.com/mytischi/mcpgram/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/mytischi/mcpgram/main/.env.example
+cp .env.example .env
+# Edit BOT_TOKEN (from @BotFather with Privacy Mode disabled) and ADMIN_TG_IDS
+docker compose --profile lite pull
+docker compose --profile lite up -d
+```
+
+### Option B: Run locally from source (Go)
 
 ```bash
 cp .env.example .env
-# Edit BOT_TOKEN (from @BotFather with Privacy Mode disabled) and ADMIN_TG_IDS
-```
-
-### 2. Run locally (Go)
-
-```bash
+# Set DATABASE_URL=./data/mcpgram.db for local macOS/Linux runs
 go build -o bin/mcpgram ./cmd/mcpgram
 ./bin/mcpgram serve
 ```
 
-Or run via Docker Compose (`lite` profile):
+## Bot Setup & Connecting MCP Clients
 
-```bash
-docker compose --profile lite up -d --build
-```
-
-### 3. Add bot to corporate chats & connect MCP client
-
-1. Add the bot to your corporate Telegram groups as **administrator** (strip dangerous rights like delete/ban).
-2. Send `/auth` to the bot in a private DM to obtain your personal Bearer token (`tgmcp_...`).
-3. Configure your MCP client (e.g. `mcp.json`):
+1. In `@BotFather`, create a bot, run `/setjoingroups` → **Enable** and `/setprivacy` → **Disable**.
+2. Add the bot to your corporate Telegram groups as **administrator** (strip dangerous rights like delete/ban/pin).
+3. Send `/auth` to the bot in a private DM to obtain your personal Bearer token (`tgmcp_...`).
+4. Add `mcpgram` to your MCP client config (`mcp.json` / `claude_desktop_config.json`):
 
 ```json
 {
@@ -62,13 +54,23 @@ docker compose --profile lite up -d --build
 }
 ```
 
-### 4. Import historical archive (optional)
+## Bot Commands (Private DM)
+
+| Command | Who | Description |
+|---|---|---|
+| `/start` | Anyone | Shows your numeric `Telegram ID` and available commands |
+| `/auth` | Corporate chat members & admins | Issues a personal Bearer token (revokes any previous token) |
+| `/status` | `ADMIN_TG_IDS` | Shows bot diagnostics, Privacy Mode status, and tracked chats (`ws=...`) |
+| `/set_policy <ws_id> <full_history\|since_join\|default>` | `ADMIN_TG_IDS` | Sets or resets per-chat history visibility override |
+| `/revoke_user <telegram_user_id>` | `ADMIN_TG_IDS` | Immediately revokes all active tokens for a user |
+
+## Import Historical Archive (Telegram Desktop JSON)
 
 Export chat history to JSON in Telegram Desktop (`result.json`) and run:
 
 ```bash
 ./bin/mcpgram import --file /path/to/result.json
-# Optional: override Bot API chat ID or import older than RETENTION_DAYS:
+# Optional: override Bot API chat ID or limit age with --retention-days:
 ./bin/mcpgram import --file /path/to/result.json --chat-id -1001234567890 --retention-days 0
 ```
 

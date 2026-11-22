@@ -291,4 +291,41 @@ func TestIngestorPrivateCommands(t *testing.T) {
 	if !strings.Contains(api.sentMessages[4].text, "mcpgram status") {
 		t.Fatalf("unexpected /status output: %q", api.sentMessages[4].text)
 	}
+
+	// 6. Admin /set_policy toggles per-chat override and resets to default.
+	chat, err := store.UpsertChat(ctx, storage.Chat{TelegramChatID: -10055, Title: "External", ChatType: "supergroup"})
+	if err != nil {
+		t.Fatalf("upsert chat: %v", err)
+	}
+	if err := ing.HandleUpdate(ctx, Update{
+		UpdateID: 6,
+		Message: &Message{
+			MessageID: 6,
+			Chat:      Chat{ID: 1000, Type: "private"},
+			From:      &User{ID: 1000},
+			Text:      "/set_policy " + chat.WorkspaceChatID + " since_join",
+		},
+	}); err != nil {
+		t.Fatalf("admin /set_policy since_join: %v", err)
+	}
+	updated, err := store.GetChatByWorkspaceID(ctx, chat.WorkspaceChatID)
+	if err != nil || updated.HistoryPolicyOverride == nil || *updated.HistoryPolicyOverride != config.HistoryPolicySinceJoin {
+		t.Fatalf("expected since_join override, got %+v (err=%v)", updated.HistoryPolicyOverride, err)
+	}
+
+	if err := ing.HandleUpdate(ctx, Update{
+		UpdateID: 7,
+		Message: &Message{
+			MessageID: 7,
+			Chat:      Chat{ID: 1000, Type: "private"},
+			From:      &User{ID: 1000},
+			Text:      "/set_policy " + chat.WorkspaceChatID + " default",
+		},
+	}); err != nil {
+		t.Fatalf("admin /set_policy default: %v", err)
+	}
+	updated, err = store.GetChatByWorkspaceID(ctx, chat.WorkspaceChatID)
+	if err != nil || updated.HistoryPolicyOverride != nil {
+		t.Fatalf("expected nil override after reset, got %+v (err=%v)", updated.HistoryPolicyOverride, err)
+	}
 }

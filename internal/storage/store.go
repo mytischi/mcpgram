@@ -870,6 +870,7 @@ func (s *Store) GetThread(ctx context.Context, params ThreadParams) ([]Message, 
 
 // IssueAuthToken revokes any active tokens for telegramUserID and issues a fresh Bearer token.
 // Only the SHA-256 hash is stored in the database; rawToken is returned once to the caller.
+// When ttl <= 0, the token does not expire automatically (expires_at = 0) until explicitly revoked.
 func (s *Store) IssueAuthToken(ctx context.Context, telegramUserID int64, ttl time.Duration) (rawToken string, rec AuthToken, err error) {
 	buf := make([]byte, 24)
 	if _, err := rand.Read(buf); err != nil {
@@ -881,7 +882,10 @@ func (s *Store) IssueAuthToken(ctx context.Context, telegramUserID int64, ttl ti
 
 	now := time.Now().UTC()
 	nowUnix := now.Unix()
-	expiresUnix := now.Add(ttl).Unix()
+	var expiresUnix int64
+	if ttl > 0 {
+		expiresUnix = now.Add(ttl).Unix()
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -939,7 +943,7 @@ func (s *Store) ValidateAuthToken(ctx context.Context, rawToken string, now time
 	if err != nil {
 		return 0, fmt.Errorf("validate auth token: %w", err)
 	}
-	if revokedAt.Valid || now.UTC().Unix() >= expiresAt {
+	if revokedAt.Valid || (expiresAt > 0 && now.UTC().Unix() >= expiresAt) {
 		return 0, ErrInvalidToken
 	}
 	return userID, nil

@@ -75,7 +75,7 @@ func TestLoadValidationErrors(t *testing.T) {
 		{"invalid history policy", map[string]string{"DEFAULT_HISTORY_POLICY": "everything"}},
 		{"invalid admin id", map[string]string{"ADMIN_TG_IDS": "abc"}},
 		{"negative retention", map[string]string{"RETENTION_DAYS": "-1"}},
-		{"zero token ttl", map[string]string{"TOKEN_TTL_DAYS": "0"}},
+		{"negative token ttl", map[string]string{"TOKEN_TTL_DAYS": "-1"}},
 		{"invalid rbac ttl", map[string]string{"RBAC_CACHE_TTL": "notaduration"}},
 		{"invalid proxy scheme", map[string]string{"TELEGRAM_PROXY_URL": "ftp://proxy:21"}},
 		{"invalid log level", map[string]string{"LOG_LEVEL": "trace"}},

@@ -92,6 +92,7 @@ func (i *Ingestor) Bootstrap(ctx context.Context) (int64, error) {
 	commands := []BotCommand{
 		{Command: "auth", Description: "Получить персональный Bearer-токен для MCP-клиента"},
 		{Command: "status", Description: "[Admin] Проверить состояние бота и отслеживаемых чатов"},
+		{Command: "set_policy", Description: "[Admin] Политика истории для чата (full_history|since_join|default)"},
 		{Command: "revoke_user", Description: "[Admin] Отозвать токены сотрудника по Telegram ID"},
 	}
 	if err := i.api.SetMyCommands(ctx, commands); err != nil {
@@ -389,6 +390,7 @@ func (i *Ingestor) handlePrivateCommand(ctx context.Context, msg *Message) error
 				"Доступные команды:\n"+
 				"• /auth — получить персональный Bearer-токен для MCP-клиента\n"+
 				"• /status — диагностика сервера (только для администраторов)\n"+
+				"• /set_policy <workspace_chat_id> <full_history|since_join|default> — политика истории для чата (только для администраторов)\n"+
 				"• /revoke_user <telegram_user_id> — мгновенный отзыв токенов (только для администраторов)",
 			userID,
 		)
@@ -399,6 +401,9 @@ func (i *Ingestor) handlePrivateCommand(ctx context.Context, msg *Message) error
 
 	case "/status":
 		return i.cmdStatus(ctx, msg.Chat.ID, userID)
+
+	case "/set_policy":
+		return i.cmdSetPolicy(ctx, msg.Chat.ID, userID, fields[1:])
 
 	case "/revoke_user":
 		return i.cmdRevokeUser(ctx, msg.Chat.ID, userID, fields[1:])
@@ -431,16 +436,59 @@ func (i *Ingestor) cmdAuth(ctx context.Context, chatID, userID int64) error {
 		return fmt.Errorf("issue auth token: %w", err)
 	}
 
-	expiresStr := time.Unix(rec.ExpiresAt, 0).UTC().Format("2006-01-02")
+	validity := "бессрочно, до отзыва"
+	if rec.ExpiresAt > 0 {
+		validity = "действует до " + time.Unix(rec.ExpiresAt, 0).UTC().Format("2006-01-02")
+	}
 	reply := fmt.Sprintf(
 		"Ваш Telegram ID: %d\n"+
-			"Персональный Bearer-токен (действует до %s, предыдущий токен аннулирован):\n\n"+
+			"Персональный Bearer-токен (%s, предыдущий токен аннулирован):\n\n"+
 			"%s\n\n"+
 			"Добавьте его в конфиг MCP-клиента (headers.Authorization: \"Bearer %s\").\n"+
 			"Важно: никогда не вставляйте этот токен в обычный чат с ИИ.",
-		userID, expiresStr, rawToken, rawToken,
+		userID, validity, rawToken, rawToken,
 	)
 	return i.api.SendMessage(ctx, chatID, reply)
+}
+
+func (i *Ingestor) cmdSetPolicy(ctx context.Context, chatID, userID int64, args []string) error {
+	if !i.cfg.IsAdmin(userID) {
+		return i.api.SendMessage(ctx, chatID, "Команда /set_policy доступна только администраторам (ADMIN_TG_IDS).")
+	}
+	if len(args) != 2 {
+		return i.api.SendMessage(ctx, chatID, "Использование: /set_policy <workspace_chat_id> <full_history|since_join|default>")
+	}
+
+	wsChatID := strings.TrimSpace(args[0])
+	rawPolicy := strings.ToLower(strings.TrimSpace(args[1]))
+
+	var policyPtr *config.HistoryPolicy
+	switch rawPolicy {
+	case "default", "reset":
+		policyPtr = nil
+	case string(config.HistoryPolicyFull), string(config.HistoryPolicySinceJoin):
+		p := config.HistoryPolicy(rawPolicy)
+		policyPtr = &p
+	default:
+		return i.api.SendMessage(ctx, chatID, "Некорректная политика. Допустимо: full_history, since_join или default.")
+	}
+
+	err := i.store.SetChatHistoryPolicyOverride(ctx, wsChatID, policyPtr)
+	if errors.Is(err, storage.ErrNotFound) {
+		return i.api.SendMessage(ctx, chatID, fmt.Sprintf("Чат %s не найден. Посмотрите актуальный ws= в /status.", wsChatID))
+	}
+	if err != nil {
+		return fmt.Errorf("set chat history policy: %w", err)
+	}
+
+	if policyPtr == nil {
+		return i.api.SendMessage(ctx, chatID,
+			fmt.Sprintf("Для чата %s сброшено переопределение — используется глобальная политика (%s).", wsChatID, i.cfg.DefaultHistoryPolicy),
+		)
+	}
+	return i.api.SendMessage(ctx, chatID,
+		fmt.Sprintf("Для чата %s установлена политика истории: %s.", wsChatID, *policyPtr),
+	)
 }
 
 func (i *Ingestor) cmdStatus(ctx context.Context, chatID, userID int64) error {
