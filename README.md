@@ -25,7 +25,7 @@ Allows employees to safely connect their AI agents (Cursor, Claude Desktop, Open
 | **`pro` (Local CPU)** | `mcpgram` + Ollama (`bge-m3`, `qwen2.5:3b`/`7b`) + `faster-whisper-small` | 4 vCPU (AVX2 / ARM64), 8 GB RAM (`qwen2.5:3b`), 25 GB SSD | 6–8 vCPU, 16 GB RAM (`qwen2.5:7b`), 40+ GB SSD | 100% air-gapped / zero cloud APIs on a standard server |
 | **`pro` (Local GPU / Apple Silicon)** | Same as `pro`, with Metal GPU (macOS native) or NVIDIA GPU | Apple Silicon M1+ (16 GB RAM) or NVIDIA GPU (8+ GB VRAM), 30 GB SSD | Apple Silicon M1–M4 (16–32 GB RAM) or RTX 3060 / L4 (12+ GB VRAM) | Fast voice transcription, embeddings & digests completely locally |
 
-- **OS & Architecture:** Linux (`amd64`, `arm64`) or macOS (`amd64`, `arm64`). Standalone static binaries have zero runtime dependencies (`CGO_ENABLED=0`, pure-Go SQLite). For Docker deployments: Docker Engine 24+ and Docker Compose v2. Native macOS `whisper-server` also requires `ffmpeg` (`brew install ffmpeg`) to decode `.oga`/`.mp4`.
+- **OS & Architecture:** Linux (`amd64`, `arm64`), macOS (`amd64`, `arm64`), or Windows (`amd64`). Standalone static binaries have zero runtime dependencies (`CGO_ENABLED=0`, pure-Go SQLite, embedded `time/tzdata`). For Docker deployments: Docker Engine 24+ and Docker Compose v2. Native `whisper-server` also requires `ffmpeg` to decode `.oga`/`.mp4`.
 - **Disk Usage:** `mcpgram` stores text, FTS5 indexes, and optional vector chunks — media files are **not** stored permanently. Expect ~150–300 MB per 100,000 messages (plus ~5–8 GB for local ML models in `pro` mode).
 - **Uptime & Network:** A 24/7 host is recommended (Telegram retains undelivered Long Polling updates for 24 hours; downtime > 20h triggers an admin DM alert). Only outbound HTTPS (`443`) to `api.telegram.org` (or via `TELEGRAM_PROXY_URL`) is needed for Telegram; MCP clients connect over LAN, VPN (Tailscale / WireGuard), or an HTTPS reverse proxy (required over the public internet and for production OAuth 2.1).
 
@@ -55,12 +55,12 @@ go build -o bin/mcpgram ./cmd/mcpgram
 
 1. In `@BotFather`, create a bot, run `/setjoingroups` → **Enable** and `/setprivacy` → **Disable**.
 2. Add the bot to your corporate Telegram groups as **administrator** (strip dangerous rights like delete/ban/pin).
-3. **Option 1 — MCP OAuth 2.1 (Recommended, zero manual tokens):**
-   - Set `OAUTH_ENABLED=true` and `PUBLIC_BASE_URL=https://tg-mcp.company.internal` (or `http://localhost:8080` locally) in `.env`.
-   - Employees open a DM with the bot and press **Start** (or `/connect`) — the bot silently verifies workspace chat membership and sends a ready-to-copy AI agent prompt with **no secrets**.
-   - The employee pastes the prompt to Cursor / Claude Code / OpenCode → clicks the OAuth link → clicks **"Confirm in Telegram"** → presses **Start** in the bot → tokens are saved automatically to the system keychain and rotated via refresh tokens.
-4. **Option 2 — Manual Bearer token (`/auth`):**
-   - Send `/auth` to the bot in a private DM to obtain a personal Bearer token (`tgmcp_...`) + ready-to-copy `mcp.json` / `claude mcp add` snippets + a **"🗑 Hide token"** button.
+3. **Option 1 — Manual Bearer token (`/auth`, default `OAUTH_ENABLED=false`, works over LAN/VPN HTTP & HTTPS):**
+   - Employees open a DM with the bot and press **Start** (or `/connect`) — the bot silently verifies workspace chat membership and sends a safe prompt (`PASTE_TOKEN_HERE`, no secrets) using the bot's own username as the MCP server name.
+   - Send `/auth` to obtain a personal Bearer token (`tgmcp_...`) + ready-to-copy `mcp.json` / `claude mcp add` snippets + a **"🗑 Hide token"** button.
+4. **Option 2 — MCP OAuth 2.1 (zero manual tokens, requires HTTPS outside `localhost`):**
+   - Set `OAUTH_ENABLED=true` and `PUBLIC_BASE_URL=https://tg-mcp.company.internal` (e.g. behind Caddy or `tailscale serve --bg 8080`; `http://localhost:8080` also works locally) in `.env`.
+   - Employees press **Start** → paste the zero-secret prompt to Cursor / Claude Code / Hermes / OpenCode → click **"Confirm in Telegram"** → press **Start** in the bot → tokens are saved and rotated automatically.
 
 ```json
 {

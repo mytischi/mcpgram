@@ -185,11 +185,11 @@ curl -s http://127.0.0.1:8080/healthz
 | Переменная | По умолчанию | Описание |
 |---|---|---|
 | `BOT_TOKEN` | *(обязательна для `serve`)* | Токен бота от `@BotFather` |
-| `ADMIN_TG_IDS` | *(пусто)* | Числовые Telegram ID администраторов через запятую (доступ к `/status`, `/set_policy`, `/digest`, `/revoke_user`) |
+| `ADMIN_TG_IDS` | *(пусто)* | Числовые Telegram ID администраторов через запятую (доступ к `/admin`, `/status`, `/set_policy`, `/digest`, `/revoke_user` и импорту файлов) |
 | `LISTEN_ADDR` | `:8080` | Адрес и порт HTTP-сервера (`/mcp`, `/healthz`, `/oauth/*`) |
-| `PUBLIC_BASE_URL` | *(пусто)* | URL сервера, доступный сотрудникам (например `https://tg-mcp.company.internal` или `http://localhost:8080`). Обязателен при `OAUTH_ENABLED=true`, используется в промптах `/start` и `/auth` |
-| `MCP_SERVER_NAME` | `company-telegram` | Отображаемое имя MCP-сервера в промптах онбординга и на странице OAuth |
-| `OAUTH_ENABLED` | `false` | Включает стандартный **MCP OAuth 2.1** (RFC 9728/8414/7591 + PKCE S256 + подтверждение через deep-link бота) |
+| `PUBLIC_BASE_URL` | *(пусто)* | URL сервера, доступный сотрудникам (например `https://tg-mcp.company.internal` или `http://172.16.8.177:8080`). Обязателен при `OAUTH_ENABLED=true`, используется в промптах `/start` и `/auth` |
+| `MCP_SERVER_NAME` | *(пусто → username бота)* | Опциональное переопределение имени MCP-сервера в промптах `/start`, `/auth` и на странице OAuth (если пусто — автоматически подставляется `@username` бота без `@`) |
+| `OAUTH_ENABLED` | `false` | Включает стандартный **MCP OAuth 2.1** (RFC 9728/8414/7591 + PKCE S256 + подтверждение через deep-link бота). По умолчанию выключен (`false`); вне `localhost` клиенты вроде Claude Code требуют `https://` (`PUBLIC_BASE_URL` за Caddy или Tailscale Serve) |
 | `OAUTH_ACCESS_TOKEN_TTL` | `24h` | Срок жизни OAuth `access_token` (продлевается клиентом автоматически) |
 | `OAUTH_REFRESH_TOKEN_DAYS` | `90` | Срок жизни OAuth `refresh_token` в днях (`0` — бессрочно до `/revoke_user`) |
 | `DATABASE_URL` | `./data/mcpgram.db` | Путь или URI SQLite (`sqlite:///data/mcpgram.db` в Docker) |
@@ -336,26 +336,28 @@ claude mcp add --transport http company-telegram http://tg-mcp.local:8080/mcp \
 ### Справочник команд бота (в личных сообщениях)
 | Команда | Кто может вызвать | Назначение |
 |---|---|---|
-| `/start` / `/help` | Любой | Показывает ваш числовой `Telegram ID` и список команд |
-| `/auth` | Участники чатов и админы | Выдаёт новый Bearer-токен (старый сразу аннулируется) |
-| `/status` | `ADMIN_TG_IDS` | Диагностика: бот, Privacy Mode, статус дайджестов/поиска/Whisper, список чатов с их `ws=...` |
+| `/start` / `/connect` | Участники чатов и админы | Тихо проверяет членство в рабочих чатах и выдаёт чистую инструкцию подключения + промпт для агента с именем бота (не раскрывает URL посторонним и не показывает админ-команды) |
+| `/auth` | Участники чатов и админы | Выдаёт новый Bearer-токен, готовые сниппеты (`mcp.json`, `claude mcp add`) и кнопку **«🗑 Hide token»** |
+| `/admin` | `ADMIN_TG_IDS` | Показывает справку по командам администратора (скрыты из публичного `/` меню и из `/start`) |
+| `/status` | `ADMIN_TG_IDS` | Диагностика: бот, OAuth, Privacy Mode, статус дайджестов/поиска/Whisper, список чатов с их `ws=...` |
 | `/set_policy <ws_id> <full_history\|since_join\|default>` | `ADMIN_TG_IDS` | Точечно переопределяет политику истории для конкретного чата (например, закрыть прошлый архив в чате с подрядчиком) |
 | `/digest [YYYY-MM-DD\|today]` | `ADMIN_TG_IDS` | Вручную запускает генерацию дайджестов (за `DIGEST_LOOKBACK_DAYS` или за конкретный день) |
-| `/revoke_user <telegram_user_id>` | `ADMIN_TG_IDS` | Мгновенно отзывает все активные токены сотрудника |
-| *(отправка файла `result.json`)* | `ADMIN_TG_IDS` | Импортирует JSON-экспорт из Telegram Desktop прямо из лички бота без SSH (до 20 МБ, без дублей) |
+| `/revoke_user <telegram_user_id>` | `ADMIN_TG_IDS` | Мгновенно отзывает все активные Bearer и OAuth refresh-токены сотрудника |
+| *(отправка `result.json` или `messages.html`)* | `ADMIN_TG_IDS` | Импортирует JSON-экспорт (Telegram Desktop) или HTML-экспорт (Telegram for macOS / Desktop) прямо из лички бота без SSH (до 20 МБ, без дублей) |
 
 ### Авто-алерт при длительном простое (> 20 часов)
 При каждом запуске `mcpgram` проверяет время последнего успешного опроса Telegram (`bots.last_poll_at`):
 * **Простой < 24 часов:** Telegram сам отдаёт все накопившиеся апдейты, сообщения не теряются.
-* **Простой ≥ 20 часов:** бот автоматически присылает всем `ADMIN_TG_IDS` в личку предупреждение с точным интервалом простоя и инструкцией, как за 30 секунд закрыть возможный пробел отправкой `result.json` в личку бота.
+* **Простой ≥ 20 часов:** бот автоматически присылает всем `ADMIN_TG_IDS` в личку предупреждение с точным интервалом простоя и инструкцией, как за 30 секунд закрыть возможный пробел отправкой `result.json` или `messages.html` в личку бота.
 
 ### Справочник CLI-команд
 ```bash
-mcpgram serve                         # Запуск основного сервера + всех включённых воркеров
-mcpgram import --file result.json     # Импорт JSON-экспорта из Telegram Desktop
-mcpgram digest [--date YYYY-MM-DD]    # Генерация дайджестов (--today, --chat-id, --force)
-mcpgram reindex                       # Построение/обновление семантических эмбеддингов
-mcpgram version                       # Версия бинарника
+mcpgram serve                                              # Запуск основного сервера + всех включённых воркеров
+mcpgram import --file result.json                          # Импорт JSON-экспорта (Telegram Desktop)
+mcpgram import --file messages.html --tz Europe/Moscow     # Импорт HTML-экспорта (Telegram for macOS / Desktop)
+mcpgram digest [--date YYYY-MM-DD]                         # Генерация дайджестов (--today, --chat-id, --force)
+mcpgram reindex                                            # Построение/обновление семантических эмбеддингов
+mcpgram version                                            # Версия бинарника
 ```
 
 ### Типовые сценарии Day-2
@@ -415,5 +417,6 @@ docker compose --profile lite up -d
 | Голосовые не расшифровываются | `WHISPER_MODE=off`, нет `ffmpeg` у `whisper-server` (`--convert`) или файл > 20 МБ | Проверьте `/status`, логи `mcpgram` и доступность `WHISPER_BASE_URL/audio/transcriptions` |
 | Ошибки подключения к `api.telegram.org` | Блокировка или корпоративный файрвол | Укажите `TELEGRAM_PROXY_URL=socks5://...` или `http://...` в `.env` и перезапустите сервер |
 | После включения Forum Topics пропал чат | Группа мигрировала в супергруппу (`-100...`) | `mcpgram` обрабатывает `migrate_to_chat_id` автоматически; проверьте `/status` — должен остаться прежний `ws=` |
-| Пропали сообщения после простоя > 24 часов | Telegram хранит очередь `getUpdates` только 24 часа | Бот сам пришлёт алерт админам при простое ≥ 20 ч; выгрузите пропущенные дни в JSON из Telegram Desktop и киньте `result.json` в личку бота |
+| Пропали сообщения после простоя > 24 часов | Telegram хранит очередь `getUpdates` только 24 часа | Бот сам пришлёт алерт админам при простое ≥ 20 ч; выгрузите пропущенные дни в `result.json` или `messages.html` и киньте файл в личку бота |
+| OAuth-клиент (Claude Code) пишет `Refusing to send credentials to non-https token endpoint` | Включён `OAUTH_ENABLED=true`, но `PUBLIC_BASE_URL` использует `http://` не на `localhost` | Поднимите HTTPS перед сервером (Caddy или `tailscale serve --bg 8080`) и укажите `https://...` в `PUBLIC_BASE_URL`, либо оставьте `OAUTH_ENABLED=false` (по умолчанию) для работы через `/auth` по LAN/VPN |
 | `/healthz` возвращает `503` (`polling: stale`) | Потеряна связь с `api.telegram.org` или завис polling (> 5 мин) | Проверьте логи `mcpgram`, сетевой доступ / `TELEGRAM_PROXY_URL` и перезапустите контейнер |
