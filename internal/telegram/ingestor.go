@@ -128,10 +128,6 @@ func (i *Ingestor) Bootstrap(ctx context.Context) (int64, error) {
 	commands := []BotCommand{
 		{Command: "connect", Description: "Get setup instructions & ready prompt for your AI agent"},
 		{Command: "auth", Description: "Issue a manual Bearer token for CLI/non-OAuth MCP clients"},
-		{Command: "status", Description: "[Admin] Check bot health, workers, and tracked chats"},
-		{Command: "digest", Description: "[Admin] Trigger daily digest generation on demand"},
-		{Command: "set_policy", Description: "[Admin] Override chat history policy (full_history|since_join|default)"},
-		{Command: "revoke_user", Description: "[Admin] Revoke all tokens for a Telegram user ID"},
 	}
 	if err := i.api.SetMyCommands(ctx, commands); err != nil {
 		i.logger.Warn("failed to set bot commands menu", "error", err)
@@ -484,6 +480,9 @@ func (i *Ingestor) handlePrivateCommand(ctx context.Context, msg *Message) error
 	case "/auth":
 		return i.cmdAuth(ctx, msg.Chat.ID, userID)
 
+	case "/admin":
+		return i.cmdAdmin(ctx, msg.Chat.ID, userID)
+
 	case "/status":
 		return i.cmdStatus(ctx, msg.Chat.ID, userID)
 
@@ -556,10 +555,10 @@ func (i *Ingestor) cmdOnboarding(ctx context.Context, chatID, userID int64) erro
 	}
 
 	mcpURL := i.mcpEndpointURL()
-	serverName := i.cfg.MCPServerName
+	serverName := i.serverName()
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Welcome to mcpgram! (Telegram ID: %d)\n\n", userID)
+	fmt.Fprintf(&b, "Welcome to %s! (Telegram ID: %d)\n\n", serverName, userID)
 
 	if i.cfg.OAuthEnabled && i.cfg.PublicBaseURL != "" {
 		fmt.Fprintf(&b, "Quick setup with MCP OAuth 2.1 (no manual tokens needed):\n")
@@ -576,16 +575,31 @@ func (i *Ingestor) cmdOnboarding(ctx context.Context, chatID, userID int64) erro
 		fmt.Fprintf(&b, "Never paste your token directly into an AI chat.")
 	}
 
-	if i.cfg.IsAdmin(userID) {
-		fmt.Fprintf(&b, "\n\nAdmin commands:\n")
-		fmt.Fprintf(&b, "• /status — server diagnostics & tracked chats\n")
-		fmt.Fprintf(&b, "• /digest [YYYY-MM-DD|today] — trigger daily digests\n")
-		fmt.Fprintf(&b, "• /set_policy <ws_id> <full_history|since_join|default> — per-chat history override\n")
-		fmt.Fprintf(&b, "• /revoke_user <telegram_user_id> — immediately revoke all user tokens\n")
-		fmt.Fprintf(&b, "• Send a Telegram export file (result.json or messages.html) here to import chat history")
-	}
-
 	return i.api.SendMessage(ctx, chatID, b.String())
+}
+
+func (i *Ingestor) cmdAdmin(ctx context.Context, chatID, userID int64) error {
+	if !i.cfg.IsAdmin(userID) {
+		return i.api.SendMessage(ctx, chatID, "The /admin command is restricted to administrators (ADMIN_TG_IDS).")
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Admin commands:\n")
+	fmt.Fprintf(&b, "• /status — server diagnostics & tracked chats\n")
+	fmt.Fprintf(&b, "• /digest [YYYY-MM-DD|today] — trigger daily digests\n")
+	fmt.Fprintf(&b, "• /set_policy <ws_id> <full_history|since_join|default> — per-chat history override\n")
+	fmt.Fprintf(&b, "• /revoke_user <telegram_user_id> — immediately revoke all user tokens\n")
+	fmt.Fprintf(&b, "• Send a Telegram export file (result.json or messages.html) here to import chat history")
+	return i.api.SendMessage(ctx, chatID, b.String())
+}
+
+func (i *Ingestor) serverName() string {
+	if s := strings.TrimSpace(i.cfg.MCPServerName); s != "" {
+		return s
+	}
+	if u := strings.TrimPrefix(strings.TrimSpace(i.botUsername), "@"); u != "" {
+		return u
+	}
+	return "mcpgram"
 }
 
 func (i *Ingestor) mcpEndpointURL() string {
@@ -619,7 +633,7 @@ func (i *Ingestor) cmdAuth(ctx context.Context, chatID, userID int64) error {
 		validity = "valid until " + time.Unix(rec.ExpiresAt, 0).UTC().Format("2006-01-02")
 	}
 	mcpURL := i.mcpEndpointURL()
-	serverName := i.cfg.MCPServerName
+	serverName := i.serverName()
 
 	reply := fmt.Sprintf(
 		"Telegram ID: %d\n"+

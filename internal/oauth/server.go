@@ -216,12 +216,20 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		clientName = "MCP Client"
 	}
 
+	serverName := strings.TrimSpace(s.cfg.MCPServerName)
+	if serverName == "" {
+		serverName = strings.TrimPrefix(strings.TrimSpace(botUsername), "@")
+	}
+	if serverName == "" {
+		serverName = "mcpgram"
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
 
 	_ = authorizeTmpl.Execute(w, authorizePageData{
-		ServerName:  s.cfg.MCPServerName,
+		ServerName:  serverName,
 		ClientName:  clientName,
 		BotUsername: botUsername,
 		DeepLink:    deepLink,

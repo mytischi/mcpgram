@@ -79,8 +79,9 @@ go build -o bin/mcpgram ./cmd/mcpgram
 
 | Command | Who | Description |
 |---|---|---|
-| `/start` / `/connect` | Workspace members & admins | Silently verifies chat membership and sends setup steps + a ready-to-copy AI agent prompt (never leaks internal server URL to outsiders) |
+| `/start` / `/connect` | Workspace members & admins | Silently verifies chat membership and sends clean setup steps + a ready-to-copy AI agent prompt named after the bot (never leaks server URL to outsiders or admin commands in onboarding) |
 | `/auth` | Workspace members & admins | Issues a manual Bearer token with ready snippets + "🗑 Hide token" button |
+| `/admin` | `ADMIN_TG_IDS` | Lists administrator commands (hidden from regular employees and public menu) |
 | `/status` | `ADMIN_TG_IDS` | Shows bot diagnostics, OAuth status, Privacy Mode, workers, and tracked chats (`ws=...`) |
 | `/digest [YYYY-MM-DD\|today]` | `ADMIN_TG_IDS` | Triggers nightly digest generation on demand (pending days or a specific date) |
 | `/set_policy <ws_id> <full_history\|since_join\|default>` | `ADMIN_TG_IDS` | Sets or resets per-chat history visibility override |

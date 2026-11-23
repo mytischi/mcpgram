@@ -424,7 +424,6 @@ func TestIngestorOAuthOnboardingAndDeepLinkApproval(t *testing.T) {
 	cfg := testConfig(t, map[string]string{
 		"OAUTH_ENABLED":   "true",
 		"PUBLIC_BASE_URL": "https://tg-mcp.company.internal",
-		"MCP_SERVER_NAME": "company-telegram",
 	})
 	approver := &fakeOAuthApprover{}
 	ing := NewIngestor(api, store, cfg, fakeAccess{allowed: map[int64]bool{200: true}}, nil)
@@ -445,7 +444,7 @@ func TestIngestorOAuthOnboardingAndDeepLinkApproval(t *testing.T) {
 		t.Fatalf("outsider must not receive internal server URL: %q", api.sentMessages[0].text)
 	}
 
-	// 2. Workspace member running /start receives OAuth 2.1 AI agent prompt with URL and zero secrets.
+	// 2. Workspace member running /start receives OAuth 2.1 AI agent prompt with bot username and no admin commands.
 	_ = ing.HandleUpdate(ctx, Update{
 		UpdateID: 2,
 		Message: &Message{
@@ -455,8 +454,36 @@ func TestIngestorOAuthOnboardingAndDeepLinkApproval(t *testing.T) {
 			Text:      "/start",
 		},
 	})
-	if !strings.Contains(api.sentMessages[1].text, "https://tg-mcp.company.internal/mcp") || !strings.Contains(api.sentMessages[1].text, "MCP OAuth 2.1") {
-		t.Fatalf("expected OAuth onboarding prompt for member, got %q", api.sentMessages[1].text)
+	if !strings.Contains(api.sentMessages[1].text, "https://tg-mcp.company.internal/mcp") ||
+		!strings.Contains(api.sentMessages[1].text, `"corp_bot"`) ||
+		strings.Contains(api.sentMessages[1].text, "Admin commands") {
+		t.Fatalf("expected OAuth onboarding prompt with bot username and no admin commands, got %q", api.sentMessages[1].text)
+	}
+
+	// 2b. Even admin running /start does NOT get admin commands in the connection prompt; /admin shows them.
+	_ = ing.HandleUpdate(ctx, Update{
+		UpdateID: 20,
+		Message: &Message{
+			MessageID: 20,
+			Chat:      Chat{ID: 1000, Type: "private"},
+			From:      &User{ID: 1000},
+			Text:      "/start",
+		},
+	})
+	if strings.Contains(api.sentMessages[len(api.sentMessages)-1].text, "Admin commands") {
+		t.Fatalf("connection prompt must not include admin commands, got %q", api.sentMessages[len(api.sentMessages)-1].text)
+	}
+	_ = ing.HandleUpdate(ctx, Update{
+		UpdateID: 21,
+		Message: &Message{
+			MessageID: 21,
+			Chat:      Chat{ID: 1000, Type: "private"},
+			From:      &User{ID: 1000},
+			Text:      "/admin",
+		},
+	})
+	if !strings.Contains(api.sentMessages[len(api.sentMessages)-1].text, "/status") {
+		t.Fatalf("expected /admin to list admin commands for admin, got %q", api.sentMessages[len(api.sentMessages)-1].text)
 	}
 
 	// 3. Member approves OAuth deep-link /start login_nonce123.

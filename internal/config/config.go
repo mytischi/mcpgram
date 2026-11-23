@@ -365,10 +365,7 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 
 	// MCP OAuth 2.1 & onboarding settings
 	cfg.PublicBaseURL = strings.TrimRight(get("PUBLIC_BASE_URL", ""), "/")
-	cfg.MCPServerName = get("MCP_SERVER_NAME", "company-telegram")
-	if cfg.MCPServerName == "" {
-		cfg.MCPServerName = "company-telegram"
-	}
+	cfg.MCPServerName = strings.TrimSpace(get("MCP_SERVER_NAME", ""))
 
 	if cfg.PublicBaseURL != "" {
 		u, err := url.Parse(cfg.PublicBaseURL)
