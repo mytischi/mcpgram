@@ -14,6 +14,19 @@ Allows employees to safely connect their AI agents (Cursor, Claude Desktop, Open
 - **Long Polling only:** no public IP, domain, or inbound webhooks required; optional HTTP/SOCKS5 `TELEGRAM_PROXY_URL`.
 - **Configurable history & retention policies:** `DEFAULT_HISTORY_POLICY=full_history` (or `since_join`, plus per-chat `/set_policy`), `RETENTION_DAYS=0` (keep forever by default), and `TOKEN_TTL_DAYS=90` (`0` for non-expiring tokens until revoked).
 
+## System Requirements
+
+| Deployment Profile | Components | Minimum Hardware | Recommended | Best For |
+|---|---|---|---|---|
+| **`lite`** *(core only)* | `mcpgram` (SQLite WAL + FTS5 + OAuth 2.1) | 1 vCPU, 256–512 MB RAM, 5 GB SSD | 1–2 vCPU, 512 MB–1 GB RAM, 10+ GB SSD | Cheap VPS ($4–5/mo), Raspberry Pi 4/5, NAS, fast start |
+| **`lite` + External API** | `mcpgram` + cloud/corporate OpenAI-compatible LLM/Whisper API | 1 vCPU, 512 MB RAM, 5 GB SSD | 1–2 vCPU, 1 GB RAM, 10+ GB SSD | Digests, semantic search & Whisper without local GPU/RAM |
+| **`pro` (Local CPU)** | `mcpgram` + Ollama (`bge-m3`, `qwen2.5:3b`/`7b`) + `faster-whisper-small` | 4 vCPU (AVX2 / ARM64), 8 GB RAM (`qwen2.5:3b`), 25 GB SSD | 6–8 vCPU, 16 GB RAM (`qwen2.5:7b`), 40+ GB SSD | 100% air-gapped / zero cloud APIs on a standard server |
+| **`pro` (Local GPU / Apple Silicon)** | Same as `pro`, with Metal GPU (macOS native) or NVIDIA GPU | Apple Silicon M1+ (16 GB RAM) or NVIDIA GPU (8+ GB VRAM), 30 GB SSD | Apple Silicon M1–M4 (16–32 GB RAM) or RTX 3060 / L4 (12+ GB VRAM) | Fast voice transcription, embeddings & digests completely locally |
+
+- **OS & Architecture:** Linux (`amd64`, `arm64`) or macOS (`amd64`, `arm64`). Standalone static binaries have zero runtime dependencies (`CGO_ENABLED=0`, pure-Go SQLite). For Docker deployments: Docker Engine 24+ and Docker Compose v2. Native macOS `whisper-server` also requires `ffmpeg` (`brew install ffmpeg`) to decode `.oga`/`.mp4`.
+- **Disk Usage:** `mcpgram` stores text, FTS5 indexes, and optional vector chunks — media files are **not** stored permanently. Expect ~150–300 MB per 100,000 messages (plus ~5–8 GB for local ML models in `pro` mode).
+- **Uptime & Network:** A 24/7 host is recommended (Telegram retains undelivered Long Polling updates for 24 hours; downtime > 20h triggers an admin DM alert). Only outbound HTTPS (`443`) to `api.telegram.org` (or via `TELEGRAM_PROXY_URL`) is needed for Telegram; MCP clients connect over LAN, VPN (Tailscale / WireGuard), or an HTTPS reverse proxy (required over the public internet and for production OAuth 2.1).
+
 ## Quick Start
 
 ### Option A: Docker Compose (`lite` profile, prebuilt multi-arch GHCR image)
