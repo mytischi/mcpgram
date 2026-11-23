@@ -28,7 +28,7 @@ import (
 	"github.com/mytischi/mcpgram/internal/whisper"
 )
 
-const version = "0.3.1"
+const version = "0.3.2"
 
 type digestTriggerAdapter struct {
 	w *digest.Worker
