@@ -258,17 +258,18 @@ func runImport(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("import", flag.ContinueOnError)
-	filePath := fs.String("file", "", "Path to Telegram Desktop result.json export file (required)")
+	filePath := fs.String("file", "", "Path to Telegram export file: JSON (result.json) or HTML (messages.html) (required)")
 	chatID := fs.Int64("chat-id", 0, "Optional Bot API telegram_chat_id override (e.g. -1001234567890)")
 	dbPath := fs.String("db", cfg.DatabasePath, "SQLite database path")
 	ignoreTag := fs.String("ignore-tag", cfg.IgnoreTag, "Messages containing this tag are skipped")
 	retentionDays := fs.Int("retention-days", cfg.RetentionDays, "Skip messages older than N days (0 = import all)")
+	timezone := fs.String("tz", cfg.DigestTimezone, "IANA timezone for HTML export timestamps without UTC offset (e.g. Europe/Moscow)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *filePath == "" {
-		return errors.New("--file is required (e.g. mcpgram import --file result.json)")
+		return errors.New("--file is required (e.g. mcpgram import --file result.json or messages.html)")
 	}
 
 	ctx := context.Background()
@@ -282,6 +283,7 @@ func runImport(args []string) error {
 		TelegramChatIDOverride: *chatID,
 		IgnoreTag:              *ignoreTag,
 		RetentionDays:          *retentionDays,
+		Timezone:               *timezone,
 	})
 	if err != nil {
 		return err

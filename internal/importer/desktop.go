@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,11 +14,12 @@ import (
 	"github.com/mytischi/mcpgram/internal/storage"
 )
 
-// Options configures a Telegram Desktop result.json import run.
+// Options configures a Telegram chat export import run (JSON or HTML).
 type Options struct {
-	TelegramChatIDOverride int64  // optional: overrides chat ID derived from result.json
+	TelegramChatIDOverride int64  // optional: overrides chat ID derived from export (or required for HTML if chat title not tracked)
 	IgnoreTag              string // e.g. "#offrecord"
 	RetentionDays          int    // 0 imports full archive regardless of age
+	Timezone               string // IANA timezone for HTML timestamps without explicit UTC offset (e.g. "Europe/Moscow")
 	Now                    time.Time
 }
 
@@ -94,7 +96,8 @@ func (f *FlexibleText) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ImportDesktopFile opens a Telegram Desktop JSON export file and imports it into store.
+// ImportDesktopFile opens a Telegram export file (JSON result.json or HTML messages.html)
+// and imports it into store.
 func ImportDesktopFile(ctx context.Context, store *storage.Store, filePath string, opts Options) (Stats, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -105,14 +108,25 @@ func ImportDesktopFile(ctx context.Context, store *storage.Store, filePath strin
 	return ImportDesktopReader(ctx, store, f, opts)
 }
 
-// ImportDesktopReader parses a Telegram Desktop JSON export from r and imports messages into store.
+// ImportDesktopReader auto-detects Telegram JSON (result.json) vs HTML (messages.html)
+// exports from r and imports messages into store.
 func ImportDesktopReader(ctx context.Context, store *storage.Store, r io.Reader, opts Options) (Stats, error) {
-	var exp desktopExport
-	dec := json.NewDecoder(r)
-	if err := dec.Decode(&exp); err != nil {
-		return Stats{}, fmt.Errorf("parse telegram desktop export json: %w", err)
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return Stats{}, fmt.Errorf("read telegram export: %w", err)
+	}
+	if isHTMLPayload(data) {
+		return ImportHTMLReader(ctx, store, bytes.NewReader(data), opts)
 	}
 
+	var exp desktopExport
+	if err := json.Unmarshal(data, &exp); err != nil {
+		return Stats{}, fmt.Errorf("parse telegram desktop export json: %w", err)
+	}
+	return importDesktopExport(ctx, store, exp, opts)
+}
+
+func importDesktopExport(ctx context.Context, store *storage.Store, exp desktopExport, opts Options) (Stats, error) {
 	tgChatID, chatType := normalizeDesktopChatID(exp.ID, exp.Type)
 	if opts.TelegramChatIDOverride != 0 {
 		tgChatID = opts.TelegramChatIDOverride

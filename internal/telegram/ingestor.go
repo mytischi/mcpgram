@@ -167,8 +167,8 @@ func (i *Ingestor) checkDowntimeAlert(ctx context.Context, botRec storage.Bot) {
 		"⚠️ Extended server downtime detected: ~%dh (from %s to %s UTC).\n"+
 			"Telegram Bot API keeps queued updates for 24 hours, so some messages during this window may have been missed.\n\n"+
 			"To backfill the gap without duplicates:\n"+
-			"1. In Telegram Desktop, open the affected chat → ⋮ → Export chat history → JSON (uncheck media, select the downtime date range).\n"+
-			"2. Send the exported result.json file directly to me in this chat (up to 20 MiB).",
+			"1. Export the affected chat in Telegram Desktop (JSON result.json) or Telegram for macOS (HTML messages.html), unchecking media.\n"+
+			"2. Send the exported result.json or messages.html file directly to me in this chat (up to 20 MiB).",
 		hours,
 		lastPoll.Format("2006-01-02 15:04"),
 		now.Format("2006-01-02 15:04"),
@@ -582,7 +582,7 @@ func (i *Ingestor) cmdOnboarding(ctx context.Context, chatID, userID int64) erro
 		fmt.Fprintf(&b, "• /digest [YYYY-MM-DD|today] — trigger daily digests\n")
 		fmt.Fprintf(&b, "• /set_policy <ws_id> <full_history|since_join|default> — per-chat history override\n")
 		fmt.Fprintf(&b, "• /revoke_user <telegram_user_id> — immediately revoke all user tokens\n")
-		fmt.Fprintf(&b, "• Send a Telegram Desktop result.json file here to import chat history")
+		fmt.Fprintf(&b, "• Send a Telegram export file (result.json or messages.html) here to import chat history")
 	}
 
 	return i.api.SendMessage(ctx, chatID, b.String())
@@ -810,18 +810,20 @@ func (i *Ingestor) handlePrivateDocument(ctx context.Context, msg *Message) erro
 	}
 	userID := msg.From.ID
 	if !i.cfg.IsAdmin(userID) {
-		return i.api.SendMessage(ctx, msg.Chat.ID, "Importing result.json files is restricted to administrators (ADMIN_TG_IDS).")
+		return i.api.SendMessage(ctx, msg.Chat.ID, "Importing chat export files (result.json / messages.html) is restricted to administrators (ADMIN_TG_IDS).")
 	}
 
 	doc := msg.Document
 	lowerName := strings.ToLower(strings.TrimSpace(doc.FileName))
 	lowerMime := strings.ToLower(strings.TrimSpace(doc.MimeType))
-	if !strings.HasSuffix(lowerName, ".json") && lowerMime != "application/json" {
-		return i.api.SendMessage(ctx, msg.Chat.ID, "Expected a Telegram Desktop JSON export file (e.g. result.json).")
+	isJSON := strings.HasSuffix(lowerName, ".json") || lowerMime == "application/json"
+	isHTML := strings.HasSuffix(lowerName, ".html") || strings.HasSuffix(lowerName, ".htm") || lowerMime == "text/html"
+	if !isJSON && !isHTML {
+		return i.api.SendMessage(ctx, msg.Chat.ID, "Expected a Telegram chat export file: JSON (result.json) or HTML (messages.html).")
 	}
 	if doc.FileSize > maxBotImportFileBytes {
 		return i.api.SendMessage(ctx, msg.Chat.ID,
-			"File exceeds Telegram Bot API limit (20 MiB). Export a smaller date range or use CLI: mcpgram import --file result.json",
+			"File exceeds Telegram Bot API limit (20 MiB). Export a smaller date range or use CLI: mcpgram import --file result.json (or messages.html)",
 		)
 	}
 
@@ -847,6 +849,7 @@ func (i *Ingestor) handlePrivateDocument(ctx context.Context, msg *Message) erro
 		TelegramChatIDOverride: chatIDOverride,
 		IgnoreTag:              i.cfg.IgnoreTag,
 		RetentionDays:          i.cfg.RetentionDays,
+		Timezone:               i.cfg.DigestTimezone,
 		Now:                    i.nowFunc().UTC(),
 	})
 	if err != nil {

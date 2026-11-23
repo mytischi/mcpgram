@@ -571,4 +571,35 @@ func TestIngestorDowntimeAlertAndPrivateJSONImport(t *testing.T) {
 	if err != nil || len(found) != 1 {
 		t.Fatalf("expected recovered message in FTS5, got (%+v, %v)", found, err)
 	}
+
+	// Admin sends Telegram for macOS HTML export (messages.html) -> auto-matched to existing chat "Recovered Chat" by title.
+	htmlPayload := []byte(`<!DOCTYPE html><html><head><title>Recovered Chat</title></head><body>` +
+		`<div class="page_header"><div class="name bold">Recovered Chat</div></div>` +
+		`<div class="message default clearfix" id="message99"><div class="body">` +
+		`<div class="pull_right date details" title="25 May 2026, 12:00:00">12:00</div>` +
+		`<div class="from_name">Bob</div><div class="text">HTML imported note</div></div></div></body></html>`)
+	api.fileData["documents/file_html_1.json"] = htmlPayload
+
+	if err := ing.HandleUpdate(ctx, Update{
+		UpdateID: 12,
+		Message: &Message{
+			MessageID: 12,
+			Chat:      Chat{ID: 1000, Type: "private"},
+			From:      &User{ID: 1000},
+			Document:  &Document{FileID: "file_html_1", FileName: "messages.html", MimeType: "text/html", FileSize: int64(len(htmlPayload))},
+		},
+	}); err != nil {
+		t.Fatalf("admin html doc import: %v", err)
+	}
+	if !strings.Contains(api.sentMessages[3].text, "Imported messages: 1") {
+		t.Fatalf("expected HTML import summary with 1 imported message, got %q", api.sentMessages[3].text)
+	}
+	foundHTML, err := store.SearchMessages(ctx, storage.SearchParams{
+		TelegramUserID:       1000,
+		Query:                "HTML imported",
+		DefaultHistoryPolicy: config.HistoryPolicyFull,
+	})
+	if err != nil || len(foundHTML) != 1 {
+		t.Fatalf("expected HTML imported message in FTS5, got (%+v, %v)", foundHTML, err)
+	}
 }

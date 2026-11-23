@@ -85,9 +85,9 @@ go build -o bin/mcpgram ./cmd/mcpgram
 | `/digest [YYYY-MM-DD\|today]` | `ADMIN_TG_IDS` | Triggers nightly digest generation on demand (pending days or a specific date) |
 | `/set_policy <ws_id> <full_history\|since_join\|default>` | `ADMIN_TG_IDS` | Sets or resets per-chat history visibility override |
 | `/revoke_user <telegram_user_id>` | `ADMIN_TG_IDS` | Immediately revokes all active Bearer & OAuth refresh tokens for a user |
-| *(send `result.json` file)* | `ADMIN_TG_IDS` | Imports a Telegram Desktop JSON export directly in bot DM without SSH (up to 20 MiB, deduplicated) |
+| *(send `result.json` or `messages.html`)* | `ADMIN_TG_IDS` | Imports a Telegram JSON (Desktop) or HTML (macOS / Desktop) export directly in bot DM without SSH (up to 20 MiB, deduplicated) |
 
-> On startup, if server downtime exceeded **20 hours**, `mcpgram` automatically alerts `ADMIN_TG_IDS` in Telegram DM so any gap beyond Telegram's 24h update window can be backfilled by dropping `result.json` into the bot chat. `/healthz` also returns `503` if polling has been stale for > 5 minutes.
+> On startup, if server downtime exceeded **20 hours**, `mcpgram` automatically alerts `ADMIN_TG_IDS` in Telegram DM so any gap beyond Telegram's 24h update window can be backfilled by dropping `result.json` or `messages.html` into the bot chat. `/healthz` also returns `503` if polling has been stale for > 5 minutes.
 
 ## Nightly Chat Digests (`get_digests`)
 
@@ -133,15 +133,18 @@ docker compose --profile pro up -d
 ./bin/mcpgram reindex
 ```
 
-## Import Historical Archive (Telegram Desktop JSON)
+## Import Historical Archive (JSON or HTML)
 
-Export chat history to JSON in Telegram Desktop (`result.json`) and run:
+Export chat history from **Telegram Desktop** (`result.json` or `messages.html`) or **Telegram for macOS** (`messages.html`, uncheck media) and either drop the file directly into the bot DM (up to 20 MiB) or run the CLI:
 
 ```bash
 ./bin/mcpgram import --file /path/to/result.json
+./bin/mcpgram import --file /path/to/messages.html --tz Europe/Moscow
 # Optional: override Bot API chat ID or limit age with --retention-days:
-./bin/mcpgram import --file /path/to/result.json --chat-id -1001234567890 --retention-days 0
+./bin/mcpgram import --file /path/to/messages.html --chat-id -1001234567890 --retention-days 0
 ```
+
+> For HTML exports (`messages.html`), `mcpgram` automatically matches the chat title to an already-tracked workspace chat (or uses `--chat-id` / numeric `chat_id` in the Telegram file caption).
 
 ## MCP Tools (Read-Only)
 
