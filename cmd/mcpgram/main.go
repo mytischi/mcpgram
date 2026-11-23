@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/mytischi/mcpgram/internal/config"
 	"github.com/mytischi/mcpgram/internal/digest"
