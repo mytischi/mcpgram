@@ -66,6 +66,9 @@ go build -o bin/mcpgram ./cmd/mcpgram
 | `/digest [YYYY-MM-DD\|today]` | `ADMIN_TG_IDS` | Triggers nightly digest generation on demand (pending days or a specific date) |
 | `/set_policy <ws_id> <full_history\|since_join\|default>` | `ADMIN_TG_IDS` | Sets or resets per-chat history visibility override |
 | `/revoke_user <telegram_user_id>` | `ADMIN_TG_IDS` | Immediately revokes all active tokens for a user |
+| *(send `result.json` file)* | `ADMIN_TG_IDS` | Imports a Telegram Desktop JSON export directly in bot DM without SSH (up to 20 MiB, deduplicated) |
+
+> On startup, if server downtime exceeded **20 hours**, `mcpgram` automatically alerts `ADMIN_TG_IDS` in Telegram DM so any gap beyond Telegram's 24h update window can be backfilled by dropping `result.json` into the bot chat. `/healthz` also returns `503` if polling has been stale for > 5 minutes.
 
 ## Nightly Chat Digests (`get_digests`)
 

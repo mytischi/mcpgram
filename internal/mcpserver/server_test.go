@@ -223,3 +223,40 @@ func TestStreamableHTTPMCPAuthAndRBACEndToEnd(t *testing.T) {
 		t.Fatal("expected HTTP 401 error after token revocation")
 	}
 }
+
+func TestHealthzPollingFreshness(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	cfg, _ := config.LoadFromLookup(func(string) (string, bool) { return "", false })
+	authz := rbac.NewAuthorizer(store, &stubChecker{}, 5*time.Minute, nil)
+	srv := New(store, store, authz, cfg, nil)
+
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	srv.nowFunc = func() time.Time { return now }
+
+	_ = store.UpsertBot(ctx, storage.Bot{BotID: 1, Username: "bot"})
+	_ = store.UpdateBotOffset(ctx, 1, 1, now.Add(-1*time.Minute).Unix())
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Fresh poll (1m ago) -> 200 OK.
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for fresh poll, got (%v, %v)", resp, err)
+	}
+	_ = resp.Body.Close()
+
+	// Stale poll (10m ago) -> 503 Service Unavailable.
+	now = now.Add(10 * time.Minute)
+	resp, err = http.Get(ts.URL + "/healthz")
+	if err != nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for stale poll, got (%v, %v)", resp, err)
+	}
+	_ = resp.Body.Close()
+}

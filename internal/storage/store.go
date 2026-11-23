@@ -100,6 +100,20 @@ func (s *Store) UpdateBotOffset(ctx context.Context, botID, offset int64, polled
 	return nil
 }
 
+// LatestBotPollTime returns the most recent polling timestamp across registered bots,
+// or nil if no poll has completed yet.
+func (s *Store) LatestBotPollTime(ctx context.Context) (*int64, error) {
+	var ts sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(last_poll_at) FROM bots`).Scan(&ts); err != nil {
+		return nil, fmt.Errorf("query latest bot poll time: %w", err)
+	}
+	if !ts.Valid {
+		return nil, nil
+	}
+	v := ts.Int64
+	return &v, nil
+}
+
 // ResolveWorkspaceChatID resolves a current or migrated Telegram chat ID to its internal workspace_chat_id.
 func (s *Store) ResolveWorkspaceChatID(ctx context.Context, telegramChatID int64) (string, error) {
 	var id string

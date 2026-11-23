@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,7 +11,13 @@ import (
 	"time"
 
 	"github.com/mytischi/mcpgram/internal/config"
+	"github.com/mytischi/mcpgram/internal/importer"
 	"github.com/mytischi/mcpgram/internal/storage"
+)
+
+const (
+	downtimeAlertThreshold = 20 * time.Hour
+	maxBotImportFileBytes  = 20 << 20 // 20 MiB Telegram Bot API getFile limit
 )
 
 // AllowedUpdates explicitly requests chat_member and my_chat_member events
@@ -118,7 +125,43 @@ func (i *Ingestor) Bootstrap(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+
+	i.checkDowntimeAlert(ctx, botRec)
 	return botRec.UpdateOffset, nil
+}
+
+func (i *Ingestor) checkDowntimeAlert(ctx context.Context, botRec storage.Bot) {
+	if botRec.LastPollAt == nil || *botRec.LastPollAt <= 0 {
+		return
+	}
+	lastPoll := time.Unix(*botRec.LastPollAt, 0).UTC()
+	now := i.nowFunc().UTC()
+	downtime := now.Sub(lastPoll)
+	if downtime < downtimeAlertThreshold {
+		return
+	}
+
+	hours := int(downtime.Hours())
+	i.logger.Warn("detected extended server downtime exceeding 20h; Telegram update queue may have dropped messages",
+		"downtime_hours", hours,
+		"last_poll_at", lastPoll.Format(time.RFC3339),
+	)
+
+	alert := fmt.Sprintf(
+		"⚠️ Обнаружен длительный простой сервера: ~%d ч (с %s по %s UTC).\n"+
+			"Очередь Telegram Bot API хранит апдейты только 24 часа, поэтому часть сообщений за это время могла быть потеряна.\n\n"+
+			"Чтобы закрыть пробел без дублей:\n"+
+			"1. В Telegram Desktop откройте нужный чат → ⋮ → Export chat history → JSON (без медиа, выберите даты простоя).\n"+
+			"2. Отправьте файл result.json прямо сюда в личку бота (до 20 МБ).",
+		hours,
+		lastPoll.Format("2006-01-02 15:04"),
+		now.Format("2006-01-02 15:04"),
+	)
+	for _, adminID := range i.cfg.AdminTGIDs {
+		if err := i.api.SendMessage(ctx, adminID, alert); err != nil {
+			i.logger.Warn("failed to send downtime alert to admin", "admin_id", adminID, "error", err)
+		}
+	}
 }
 
 // Run bootstraps the bot and runs the Long Polling loop until ctx is canceled.
@@ -278,6 +321,9 @@ func (i *Ingestor) handleMessage(ctx context.Context, msg *Message, edited bool)
 		if edited {
 			return nil
 		}
+		if msg.Document != nil {
+			return i.handlePrivateDocument(ctx, msg)
+		}
 		return i.handlePrivateCommand(ctx, msg)
 	}
 
@@ -407,7 +453,8 @@ func (i *Ingestor) handlePrivateCommand(ctx context.Context, msg *Message) error
 				"• /status — диагностика сервера (только для администраторов)\n"+
 				"• /digest [YYYY-MM-DD|today] — запустить генерацию дайджестов (только для администраторов)\n"+
 				"• /set_policy <workspace_chat_id> <full_history|since_join|default> — политика истории для чата (только для администраторов)\n"+
-				"• /revoke_user <telegram_user_id> — мгновенный отзыв токенов (только для администраторов)",
+				"• /revoke_user <telegram_user_id> — мгновенный отзыв токенов (только для администраторов)\n"+
+				"• Импорт истории (админы): отправьте файл result.json из Telegram Desktop прямо в этот чат",
 			userID,
 		)
 		return i.api.SendMessage(ctx, msg.Chat.ID, reply)
@@ -623,4 +670,68 @@ func (i *Ingestor) cmdDigest(ctx context.Context, chatID, userID int64, args []s
 	return i.api.SendMessage(ctx, chatID,
 		fmt.Sprintf("Дайджесты %s готовы: создано/обновлено=%d, пропущено=%d, ошибок=%d.", label, generated, skipped, failed),
 	)
+}
+
+func (i *Ingestor) handlePrivateDocument(ctx context.Context, msg *Message) error {
+	if msg.From == nil || msg.Document == nil {
+		return nil
+	}
+	userID := msg.From.ID
+	if !i.cfg.IsAdmin(userID) {
+		return i.api.SendMessage(ctx, msg.Chat.ID, "Импорт файлов result.json доступен только администраторам (ADMIN_TG_IDS).")
+	}
+
+	doc := msg.Document
+	lowerName := strings.ToLower(strings.TrimSpace(doc.FileName))
+	lowerMime := strings.ToLower(strings.TrimSpace(doc.MimeType))
+	if !strings.HasSuffix(lowerName, ".json") && lowerMime != "application/json" {
+		return i.api.SendMessage(ctx, msg.Chat.ID, "Ожидается JSON-файл экспорта из Telegram Desktop (например, result.json).")
+	}
+	if doc.FileSize > maxBotImportFileBytes {
+		return i.api.SendMessage(ctx, msg.Chat.ID,
+			"Файл превышает лимит Telegram Bot API (20 МБ). Экспортируйте чат частями по датам или используйте CLI: mcpgram import --file result.json",
+		)
+	}
+
+	var chatIDOverride int64
+	if capText := strings.TrimSpace(msg.Caption); capText != "" {
+		fields := strings.Fields(capText)
+		last := fields[len(fields)-1]
+		if parsed, err := strconv.ParseInt(last, 10, 64); err == nil && parsed != 0 {
+			chatIDOverride = parsed
+		}
+	}
+
+	fileInfo, err := i.api.GetFile(ctx, doc.FileID)
+	if err != nil {
+		return i.api.SendMessage(ctx, msg.Chat.ID, fmt.Sprintf("Не удалось получить файл из Telegram: %v", err))
+	}
+	data, err := i.api.DownloadFile(ctx, fileInfo.FilePath, maxBotImportFileBytes)
+	if err != nil {
+		return i.api.SendMessage(ctx, msg.Chat.ID, fmt.Sprintf("Не удалось скачать файл: %v", err))
+	}
+
+	stats, err := importer.ImportDesktopReader(ctx, i.store, bytes.NewReader(data), importer.Options{
+		TelegramChatIDOverride: chatIDOverride,
+		IgnoreTag:              i.cfg.IgnoreTag,
+		RetentionDays:          i.cfg.RetentionDays,
+		Now:                    i.nowFunc().UTC(),
+	})
+	if err != nil {
+		return i.api.SendMessage(ctx, msg.Chat.ID, fmt.Sprintf("Ошибка импорта %s: %v", doc.FileName, err))
+	}
+
+	reply := fmt.Sprintf(
+		"Импорт %s завершён (без дублей):\n"+
+			"• Чат: %s (tg_id=%d, ws=%s)\n"+
+			"• Импортировано сообщений: %d\n"+
+			"• Пропущено (%s): %d\n"+
+			"• Пропущено (старше retention): %d\n"+
+			"• Сервисных/пустых: %d\n\n"+
+			"Поиск (FTS5) уже обновлён. Семантический индекс подхватит новые сообщения автоматически.",
+		doc.FileName, stats.ChatTitle, stats.TelegramChatID, stats.WorkspaceChatID,
+		stats.Imported, i.cfg.IgnoreTag, stats.IgnoredOffrec,
+		stats.SkippedOld, stats.SkippedNonMsg,
+	)
+	return i.api.SendMessage(ctx, msg.Chat.ID, reply)
 }

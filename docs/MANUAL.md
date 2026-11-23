@@ -128,8 +128,9 @@ docker compose logs -f mcpgram
 #### Проверка, что всё поднялось
 ```bash
 curl -s http://127.0.0.1:8080/healthz
-# Ожидаемый ответ: {"db":"ok","status":"ok"}
+# Ожидаемый ответ: {"db":"ok","last_poll_at":"...","polling":"ok","status":"ok"}
 ```
+`/healthz` проверяет не только БД, но и «свежесть» polling-цикла: если бот не получал ответа от Telegram дольше **5 минут**, `/healthz` вернёт `503 Service Unavailable` (`"polling":"stale"`), что удобно подключить к Uptime Kuma / Healthchecks.io.
 В логах `mcpgram` должна появиться строка `telegram bot verified ... can_read_all_group_messages=true`. Если там предупреждение про Privacy Mode — вернитесь к шагу 4 раздела 2.2.
 
 ---
@@ -238,23 +239,28 @@ curl -s http://127.0.0.1:8080/healthz
 
 ### 2.7. Импорт старой истории из Telegram Desktop (`result.json`)
 
-Telegram Bot API не отдаёт сообщения, отправленные до добавления бота. Чтобы загрузить старый архив:
+Telegram Bot API не отдаёт сообщения, отправленные до добавления бота (а также удаляет апдейты из очереди при простое сервера **дольше 24 часов**). Чтобы загрузить старый архив или закрыть пробел без дубликатов:
 
-1. В **Telegram Desktop** откройте нужный чат → меню (`⋮`) → **Export chat history** → выберите формат **JSON** (медиа скачивать не обязательно) → получите `result.json`.
-2. Выполните импорт:
-   ```bash
-   # Нативный бинарник:
-   ./mcpgram import --file /path/to/result.json
+1. В **Telegram Desktop** *(важно для macOS: используйте именно **Telegram Desktop** с `desktop.telegram.org`, в нативном клиенте из Mac App Store кнопки экспорта нет)* откройте нужный чат → меню (`⋮`) → **Export chat history**.
+2. **Снимите все галочки с медиа** (нужен только текст — экспорт займёт 1–2 секунды), в поле **Format** выберите **Machine-readable JSON**, при необходимости задайте диапазон дат **From / To** → нажмите **Export** → получите файл **`result.json`**.
+3. Загрузите `result.json` одним из двух способов:
 
-   # Или внутри Docker-контейнера:
-   docker compose exec -T mcpgram mcpgram import --file /data/result.json
-   ```
-   *(Если нужно явно задать Bot API `chat_id` или ограничить глубину: `--chat-id -1001234567890 --retention-days 0`.)*
-3. Если включены семантический поиск и/или дайджесты, сразу проиндексируйте загруженный архив:
-   ```bash
-   ./mcpgram reindex
-   ./mcpgram digest
-   ```
+**Способ 1 (без SSH — прямо в личке бота, до 20 МБ ≈ 30–50 тыс. сообщений):**
+* Просто перетащите файл `result.json` в **личный чат с ботом** от имени администратора (`ADMIN_TG_IDS`).
+* *(Если нужно явно указать Bot API `chat_id`, добавьте его в подпись к файлу, например `-1001234567890`.)*
+* Бот сам импортирует сообщения без дублей (учитывая `#offrecord` и `RETENTION_DAYS`), обновит FTS5 и ответит статистикой.
+
+**Способ 2 (через CLI — без лимита 20 МБ):**
+```bash
+# Нативный бинарник:
+./mcpgram import --file /path/to/result.json
+
+# Или внутри Docker-контейнера:
+docker compose exec -T mcpgram mcpgram import --file /data/result.json
+```
+*(Опционально: `--chat-id -1001234567890 --retention-days 0`.)*
+
+4. Если включены семантический поиск и/или дайджесты, они подхватят импортированные сообщения в следующем цикле (или можно запустить сразу вручную: `./mcpgram reindex` и `/digest` / `./mcpgram digest`).
 
 ---
 
@@ -322,6 +328,12 @@ claude mcp add --transport http company-telegram http://tg-mcp.local:8080/mcp \
 | `/set_policy <ws_id> <full_history\|since_join\|default>` | `ADMIN_TG_IDS` | Точечно переопределяет политику истории для конкретного чата (например, закрыть прошлый архив в чате с подрядчиком) |
 | `/digest [YYYY-MM-DD\|today]` | `ADMIN_TG_IDS` | Вручную запускает генерацию дайджестов (за `DIGEST_LOOKBACK_DAYS` или за конкретный день) |
 | `/revoke_user <telegram_user_id>` | `ADMIN_TG_IDS` | Мгновенно отзывает все активные токены сотрудника |
+| *(отправка файла `result.json`)* | `ADMIN_TG_IDS` | Импортирует JSON-экспорт из Telegram Desktop прямо из лички бота без SSH (до 20 МБ, без дублей) |
+
+### Авто-алерт при длительном простое (> 20 часов)
+При каждом запуске `mcpgram` проверяет время последнего успешного опроса Telegram (`bots.last_poll_at`):
+* **Простой < 24 часов:** Telegram сам отдаёт все накопившиеся апдейты, сообщения не теряются.
+* **Простой ≥ 20 часов:** бот автоматически присылает всем `ADMIN_TG_IDS` в личку предупреждение с точным интервалом простоя и инструкцией, как за 30 секунд закрыть возможный пробел отправкой `result.json` в личку бота.
 
 ### Справочник CLI-команд
 ```bash
@@ -389,3 +401,5 @@ docker compose --profile lite up -d
 | Голосовые не расшифровываются | `WHISPER_MODE=off`, нет `ffmpeg` у `whisper-server` (`--convert`) или файл > 20 МБ | Проверьте `/status`, логи `mcpgram` и доступность `WHISPER_BASE_URL/audio/transcriptions` |
 | Ошибки подключения к `api.telegram.org` | Блокировка или корпоративный файрвол | Укажите `TELEGRAM_PROXY_URL=socks5://...` или `http://...` в `.env` и перезапустите сервер |
 | После включения Forum Topics пропал чат | Группа мигрировала в супергруппу (`-100...`) | `mcpgram` обрабатывает `migrate_to_chat_id` автоматически; проверьте `/status` — должен остаться прежний `ws=` |
+| Пропали сообщения после простоя > 24 часов | Telegram хранит очередь `getUpdates` только 24 часа | Бот сам пришлёт алерт админам при простое ≥ 20 ч; выгрузите пропущенные дни в JSON из Telegram Desktop и киньте `result.json` в личку бота |
+| `/healthz` возвращает `503` (`polling: stale`) | Потеряна связь с `api.telegram.org` или завис polling (> 5 мин) | Проверьте логи `mcpgram`, сетевой доступ / `TELEGRAM_PROXY_URL` и перезапустите контейнер |

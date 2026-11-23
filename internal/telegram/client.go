@@ -25,6 +25,8 @@ type API interface {
 	GetUpdates(ctx context.Context, offset int64, timeoutSec int, allowedUpdates []string) ([]Update, error)
 	GetChatMember(ctx context.Context, chatID, userID int64) (ChatMember, error)
 	SendMessage(ctx context.Context, chatID int64, text string) error
+	GetFile(ctx context.Context, fileID string) (File, error)
+	DownloadFile(ctx context.Context, filePath string, maxBytes int64) ([]byte, error)
 }
 
 // APIError represents an unsuccessful response returned by the Telegram Bot API.

@@ -17,6 +17,7 @@ type fakeAPI struct {
 		text   string
 	}
 	commandsSet bool
+	fileData    map[string][]byte
 }
 
 func (f *fakeAPI) GetMe(_ context.Context) (User, error) { return f.me, nil }
@@ -36,6 +37,17 @@ func (f *fakeAPI) SendMessage(_ context.Context, chatID int64, text string) erro
 		text   string
 	}{chatID: chatID, text: text})
 	return nil
+}
+func (f *fakeAPI) GetFile(_ context.Context, fileID string) (File, error) {
+	return File{FileID: fileID, FilePath: "documents/" + fileID + ".json"}, nil
+}
+func (f *fakeAPI) DownloadFile(_ context.Context, filePath string, _ int64) ([]byte, error) {
+	if f.fileData != nil {
+		if data, ok := f.fileData[filePath]; ok {
+			return data, nil
+		}
+	}
+	return nil, nil
 }
 
 type fakeAccess struct {
@@ -344,5 +356,94 @@ func TestIngestorPrivateCommands(t *testing.T) {
 	lastMsg := api.sentMessages[len(api.sentMessages)-1].text
 	if !strings.Contains(lastMsg, "DIGEST_MODE=openai_compatible") {
 		t.Fatalf("expected disabled digest hint, got %q", lastMsg)
+	}
+}
+
+func TestIngestorDowntimeAlertAndPrivateJSONImport(t *testing.T) {
+	ctx := context.Background()
+	store := openIngestorStore(t)
+
+	// Pre-seed bot with a last_poll_at 26 hours in the past.
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	oldPoll := now.Add(-26 * time.Hour).Unix()
+	_ = store.UpsertBot(ctx, storage.Bot{BotID: 555, Username: "corp_bot"})
+	_ = store.UpdateBotOffset(ctx, 555, 10, oldPoll)
+
+	sampleJSON := []byte(`{
+		"name": "Recovered Chat",
+		"type": "private_supergroup",
+		"id": 999888777,
+		"messages": [
+			{"id": 1, "type": "message", "date_unixtime": "1795250000", "from": "Alice", "from_id": "user101", "text": "Восстановленное сообщение за выходные"},
+			{"id": 2, "type": "message", "date_unixtime": "1795250100", "from": "Bob", "from_id": "user102", "text": "Секрет #offrecord"}
+		]
+	}`)
+
+	api := &fakeAPI{
+		me:       User{ID: 555, Username: "corp_bot", FirstName: "Corp", CanReadAllGroupMessages: true},
+		fileData: map[string][]byte{"documents/file_json_1.json": sampleJSON},
+	}
+
+	ing := NewIngestor(api, store, testConfig(t), fakeAccess{}, nil)
+	ing.nowFunc = func() time.Time { return now }
+
+	// 1. Bootstrap detects 26h downtime and notifies admin 1000.
+	if _, err := ing.Bootstrap(ctx); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if len(api.sentMessages) != 1 || api.sentMessages[0].chatID != 1000 || !strings.Contains(api.sentMessages[0].text, "длительный простой") {
+		t.Fatalf("expected downtime alert to admin 1000, got %+v", api.sentMessages)
+	}
+
+	// 2. Non-admin sending result.json is rejected.
+	if err := ing.HandleUpdate(ctx, Update{
+		UpdateID: 10,
+		Message: &Message{
+			MessageID: 10,
+			Chat:      Chat{ID: 200, Type: "private"},
+			From:      &User{ID: 200},
+			Document:  &Document{FileID: "file_json_1", FileName: "result.json", MimeType: "application/json", FileSize: 200},
+		},
+	}); err != nil {
+		t.Fatalf("non-admin doc import: %v", err)
+	}
+	if !strings.Contains(api.sentMessages[1].text, "только администраторам") {
+		t.Fatalf("expected admin-only rejection, got %q", api.sentMessages[1].text)
+	}
+
+	// 3. Admin sends result.json in DM -> imported into DB and searchable via FTS5!
+	if err := ing.HandleUpdate(ctx, Update{
+		UpdateID: 11,
+		Message: &Message{
+			MessageID: 11,
+			Chat:      Chat{ID: 1000, Type: "private"},
+			From:      &User{ID: 1000},
+			Document:  &Document{FileID: "file_json_1", FileName: "result.json", MimeType: "application/json", FileSize: 200},
+		},
+	}); err != nil {
+		t.Fatalf("admin doc import: %v", err)
+	}
+	if !strings.Contains(api.sentMessages[2].text, "Импортировано сообщений: 1") {
+		t.Fatalf("expected import summary with 1 imported message, got %q", api.sentMessages[2].text)
+	}
+
+	wsID, err := store.ResolveWorkspaceChatID(ctx, -100999888777)
+	if err != nil {
+		t.Fatalf("resolve imported chat: %v", err)
+	}
+	_ = store.UpsertChatACL(ctx, storage.ChatACL{
+		WorkspaceChatID: wsID,
+		TelegramUserID:  1000,
+		Status:          "administrator",
+		IsMember:        true,
+		CheckedAt:       now.Unix(),
+	})
+	found, err := store.SearchMessages(ctx, storage.SearchParams{
+		TelegramUserID:       1000,
+		Query:                "Восстановленное",
+		DefaultHistoryPolicy: config.HistoryPolicyFull,
+	})
+	if err != nil || len(found) != 1 {
+		t.Fatalf("expected recovered message in FTS5, got (%+v, %v)", found, err)
 	}
 }
