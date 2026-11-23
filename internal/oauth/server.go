@@ -575,8 +575,8 @@ var authorizeTmpl = template.Must(template.New("authorize").Parse(`<!doctype htm
     <h1>Authorize {{.ClientName}}</h1>
     <p>Sign in to <strong>{{.ServerName}}</strong> (Read-Only MCP access to workspace Telegram chats where you are a member).</p>
     {{if .DeepLink}}
-      <a class="btn" href="{{.DeepLink}}">Confirm in Telegram (@{{.BotUsername}})</a>
-      <p style="margin-top: 14px; margin-bottom: 4px; font-size: 12px;">Or send this command directly to @{{.BotUsername}} in Telegram:</p>
+      <a class="btn" href="{{.DeepLink}}" target="_blank" rel="noopener noreferrer">Confirm in Telegram (@{{.BotUsername}})</a>
+      <p style="margin-top: 12px; margin-bottom: 4px; font-size: 12px;">Keep this tab open — it will redirect automatically once you press Start in Telegram. Or send this command directly to @{{.BotUsername}}:</p>
     {{else}}
       <p style="font-size: 13px;">Send this command to your workspace Telegram bot:</p>
     {{end}}

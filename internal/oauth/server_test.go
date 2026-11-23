@@ -109,6 +109,9 @@ func TestOAuth21FullPKCEAndRefreshFlow(t *testing.T) {
 	if !strings.Contains(page, "https://t.me/corp_mcp_bot?start=login_") {
 		t.Fatalf("expected Telegram deep-link in authorize page, got: %s", page)
 	}
+	if !strings.Contains(page, `target="_blank"`) {
+		t.Fatalf("expected Telegram deep-link to open in a new tab so polling stays active, got: %s", page)
+	}
 
 	// Extract nonce from deep-link.
 	idx := strings.Index(page, "start=login_")
