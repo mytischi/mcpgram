@@ -1,5 +1,7 @@
 # mcpgram
 
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 Self-hosted Telegram Corporate MCP Server written in Go.
 
 Allows employees to safely connect their AI agents (Cursor, Claude Desktop, OpenCode, CLI agents, etc.) to corporate Telegram group chats via **MCP (Model Context Protocol)** over Streamable HTTP — with strict Read-Only access and dynamic RBAC synchronized with Telegram chat membership.
@@ -155,3 +157,7 @@ Export chat history to JSON in Telegram Desktop (`result.json`) and run:
 go vet ./...
 go test -race ./...
 ```
+
+## License
+
+Copyright 2026 Matvei Naumov. Licensed under the [Apache License 2.0](LICENSE).
