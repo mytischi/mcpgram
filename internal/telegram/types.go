@@ -251,6 +251,27 @@ type Update struct {
 	EditedMessage *Message           `json:"edited_message,omitempty"`
 	MyChatMember  *ChatMemberUpdated `json:"my_chat_member,omitempty"`
 	ChatMember    *ChatMemberUpdated `json:"chat_member,omitempty"`
+	CallbackQuery *CallbackQuery     `json:"callback_query,omitempty"`
+}
+
+// CallbackQuery represents an incoming button press on an inline keyboard.
+type CallbackQuery struct {
+	ID      string   `json:"id"`
+	From    User     `json:"from"`
+	Message *Message `json:"message,omitempty"`
+	Data    string   `json:"data,omitempty"`
+}
+
+// InlineKeyboardMarkup defines an inline keyboard attached to a bot message.
+type InlineKeyboardMarkup struct {
+	InlineKeyboard [][]InlineKeyboardButton `json:"inline_keyboard"`
+}
+
+// InlineKeyboardButton represents one button in an inline keyboard.
+type InlineKeyboardButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data,omitempty"`
+	URL          string `json:"url,omitempty"`
 }
 
 // BotCommand represents a command shown in Telegram's bot menu.

@@ -16,6 +16,7 @@ import (
 	"github.com/mytischi/mcpgram/internal/digest"
 	"github.com/mytischi/mcpgram/internal/importer"
 	"github.com/mytischi/mcpgram/internal/mcpserver"
+	"github.com/mytischi/mcpgram/internal/oauth"
 	"github.com/mytischi/mcpgram/internal/rbac"
 	"github.com/mytischi/mcpgram/internal/retention"
 	"github.com/mytischi/mcpgram/internal/semantic"
@@ -24,7 +25,7 @@ import (
 	"github.com/mytischi/mcpgram/internal/whisper"
 )
 
-const version = "0.2.1"
+const version = "0.3.0"
 
 type digestTriggerAdapter struct {
 	w *digest.Worker
@@ -170,6 +171,12 @@ func runServe() error {
 	retentionWorker := retention.NewWorker(store, cfg.RetentionDays, time.Hour, logger)
 	mcpSrv := mcpserver.New(store, searcher, authorizer, cfg, logger)
 
+	if cfg.OAuthEnabled {
+		oauthSrv := oauth.NewServer(store, cfg, authorizer, logger)
+		mcpSrv.SetOAuth(oauthSrv)
+		ingestor.SetOAuthApprover(oauthSrv)
+	}
+
 	httpSrv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           mcpSrv.Handler(),
@@ -218,6 +225,7 @@ func runServe() error {
 			"digest_mode", cfg.DigestMode,
 			"embedding_mode", cfg.EmbeddingMode,
 			"whisper_mode", cfg.WhisperMode,
+			"oauth_enabled", cfg.OAuthEnabled,
 		)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("http server stopped: %w", err)

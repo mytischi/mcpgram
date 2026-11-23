@@ -25,6 +25,9 @@ type API interface {
 	GetUpdates(ctx context.Context, offset int64, timeoutSec int, allowedUpdates []string) ([]Update, error)
 	GetChatMember(ctx context.Context, chatID, userID int64) (ChatMember, error)
 	SendMessage(ctx context.Context, chatID int64, text string) error
+	SendMessageWithKeyboard(ctx context.Context, chatID int64, text string, keyboard *InlineKeyboardMarkup) error
+	EditMessageText(ctx context.Context, chatID, messageID int64, text string) error
+	AnswerCallbackQuery(ctx context.Context, callbackQueryID, text string) error
 	GetFile(ctx context.Context, fileID string) (File, error)
 	DownloadFile(ctx context.Context, filePath string, maxBytes int64) ([]byte, error)
 }
@@ -187,12 +190,40 @@ func (c *Client) GetChatMember(ctx context.Context, chatID, userID int64) (ChatM
 }
 
 func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) error {
+	return c.SendMessageWithKeyboard(ctx, chatID, text, nil)
+}
+
+func (c *Client) SendMessageWithKeyboard(ctx context.Context, chatID int64, text string, keyboard *InlineKeyboardMarkup) error {
 	payload := map[string]any{
 		"chat_id": chatID,
 		"text":    text,
 	}
+	if keyboard != nil {
+		payload["reply_markup"] = keyboard
+	}
 	var out Message
 	return c.call(ctx, c.apiClient, "sendMessage", payload, &out)
+}
+
+func (c *Client) EditMessageText(ctx context.Context, chatID, messageID int64, text string) error {
+	payload := map[string]any{
+		"chat_id":    chatID,
+		"message_id": messageID,
+		"text":       text,
+	}
+	var out Message
+	return c.call(ctx, c.apiClient, "editMessageText", payload, &out)
+}
+
+func (c *Client) AnswerCallbackQuery(ctx context.Context, callbackQueryID, text string) error {
+	payload := map[string]any{
+		"callback_query_id": callbackQueryID,
+	}
+	if text != "" {
+		payload["text"] = text
+	}
+	var ok bool
+	return c.call(ctx, c.apiClient, "answerCallbackQuery", payload, &ok)
 }
 
 // GetFile resolves a Telegram file_id into a downloadable file_path.

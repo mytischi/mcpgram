@@ -32,25 +32,26 @@ var _ TokenValidator = (*storage.Store)(nil)
 
 // AuthMiddleware enforces Authorization: Bearer <token> on every HTTP request,
 // resolving the caller's telegram_user_id into request context.
-func AuthMiddleware(validator TokenValidator, nowFunc func() time.Time, next http.Handler) http.Handler {
+// When resourceMetadataURL is non-empty, 401 responses advertise RFC 9728 OAuth 2.1 discovery.
+func AuthMiddleware(validator TokenValidator, nowFunc func() time.Time, resourceMetadataURL string, next http.Handler) http.Handler {
 	if nowFunc == nil {
 		nowFunc = time.Now
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authz := strings.TrimSpace(r.Header.Get("Authorization"))
 		if !strings.HasPrefix(strings.ToLower(authz), "bearer ") {
-			writeUnauthorized(w, "missing bearer token")
+			writeUnauthorized(w, "missing bearer token", resourceMetadataURL)
 			return
 		}
 		rawToken := strings.TrimSpace(authz[len("bearer "):])
 		if rawToken == "" {
-			writeUnauthorized(w, "empty bearer token")
+			writeUnauthorized(w, "empty bearer token", resourceMetadataURL)
 			return
 		}
 
 		userID, err := validator.ValidateAuthToken(r.Context(), rawToken, nowFunc())
 		if err != nil {
-			writeUnauthorized(w, "invalid, revoked, or expired bearer token")
+			writeUnauthorized(w, "invalid, revoked, or expired bearer token", resourceMetadataURL)
 			return
 		}
 
@@ -58,9 +59,13 @@ func AuthMiddleware(validator TokenValidator, nowFunc func() time.Time, next htt
 	})
 }
 
-func writeUnauthorized(w http.ResponseWriter, msg string) {
+func writeUnauthorized(w http.ResponseWriter, msg, resourceMetadataURL string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("WWW-Authenticate", `Bearer realm="mcpgram"`)
+	if resourceMetadataURL != "" {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="mcpgram", resource_metadata="`+resourceMetadataURL+`"`)
+	} else {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="mcpgram"`)
+	}
 	w.WriteHeader(http.StatusUnauthorized)
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error": msg,

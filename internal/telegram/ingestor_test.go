@@ -13,11 +13,18 @@ import (
 type fakeAPI struct {
 	me           User
 	sentMessages []struct {
-		chatID int64
-		text   string
+		chatID   int64
+		text     string
+		keyboard *InlineKeyboardMarkup
 	}
-	commandsSet bool
-	fileData    map[string][]byte
+	editedMessages []struct {
+		chatID    int64
+		messageID int64
+		text      string
+	}
+	answeredCallbacks []string
+	commandsSet       bool
+	fileData          map[string][]byte
 }
 
 func (f *fakeAPI) GetMe(_ context.Context) (User, error) { return f.me, nil }
@@ -32,10 +39,26 @@ func (f *fakeAPI) GetChatMember(_ context.Context, _, _ int64) (ChatMember, erro
 	return ChatMember{}, nil
 }
 func (f *fakeAPI) SendMessage(_ context.Context, chatID int64, text string) error {
+	return f.SendMessageWithKeyboard(context.Background(), chatID, text, nil)
+}
+func (f *fakeAPI) SendMessageWithKeyboard(_ context.Context, chatID int64, text string, kb *InlineKeyboardMarkup) error {
 	f.sentMessages = append(f.sentMessages, struct {
-		chatID int64
-		text   string
-	}{chatID: chatID, text: text})
+		chatID   int64
+		text     string
+		keyboard *InlineKeyboardMarkup
+	}{chatID: chatID, text: text, keyboard: kb})
+	return nil
+}
+func (f *fakeAPI) EditMessageText(_ context.Context, chatID, messageID int64, text string) error {
+	f.editedMessages = append(f.editedMessages, struct {
+		chatID    int64
+		messageID int64
+		text      string
+	}{chatID: chatID, messageID: messageID, text: text})
+	return nil
+}
+func (f *fakeAPI) AnswerCallbackQuery(_ context.Context, callbackQueryID, _ string) error {
+	f.answeredCallbacks = append(f.answeredCallbacks, callbackQueryID)
 	return nil
 }
 func (f *fakeAPI) GetFile(_ context.Context, fileID string) (File, error) {
@@ -58,15 +81,41 @@ func (f fakeAccess) HasAnyTrackedChatAccess(_ context.Context, userID int64) (bo
 	return f.allowed[userID], nil
 }
 
-func testConfig(t *testing.T) config.Config {
+type fakeOAuthApprover struct {
+	approved map[string]int64
+	denied   map[string]bool
+}
+
+func (f *fakeOAuthApprover) ApproveLogin(_ context.Context, nonce string, userID int64) error {
+	if f.approved == nil {
+		f.approved = make(map[string]int64)
+	}
+	f.approved[nonce] = userID
+	return nil
+}
+
+func (f *fakeOAuthApprover) DenyLogin(_ context.Context, nonce string) error {
+	if f.denied == nil {
+		f.denied = make(map[string]bool)
+	}
+	f.denied[nonce] = true
+	return nil
+}
+
+func testConfig(t *testing.T, extra ...map[string]string) config.Config {
 	t.Helper()
-	cfg, err := config.LoadFromLookup(func(k string) (string, bool) {
-		m := map[string]string{
-			"BOT_TOKEN":              "123:token",
-			"ADMIN_TG_IDS":           "1000",
-			"DEFAULT_HISTORY_POLICY": "full_history",
-			"IGNORE_TAG":             "#offrecord",
+	m := map[string]string{
+		"BOT_TOKEN":              "123:token",
+		"ADMIN_TG_IDS":           "1000",
+		"DEFAULT_HISTORY_POLICY": "full_history",
+		"IGNORE_TAG":             "#offrecord",
+	}
+	for _, ov := range extra {
+		for k, v := range ov {
+			m[k] = v
 		}
+	}
+	cfg, err := config.LoadFromLookup(func(k string) (string, bool) {
 		v, ok := m[k]
 		return v, ok
 	})
@@ -99,7 +148,6 @@ func TestIngestorMessagesTopicsMigrationAndACL(t *testing.T) {
 		t.Fatal("expected SetMyCommands to be called")
 	}
 
-	// 1. Bot promoted to admin in group -1001.
 	if err := ing.HandleUpdate(ctx, Update{
 		UpdateID: 1,
 		MyChatMember: &ChatMemberUpdated{
@@ -111,7 +159,6 @@ func TestIngestorMessagesTopicsMigrationAndACL(t *testing.T) {
 		t.Fatalf("my_chat_member: %v", err)
 	}
 
-	// 2. User 200 joins group at t=1100.
 	if err := ing.HandleUpdate(ctx, Update{
 		UpdateID: 2,
 		ChatMember: &ChatMemberUpdated{
@@ -124,18 +171,15 @@ func TestIngestorMessagesTopicsMigrationAndACL(t *testing.T) {
 		t.Fatalf("chat_member join: %v", err)
 	}
 
-	// 3. Message with caption + document metadata, plus #offrecord message.
 	threadID := int64(42)
 	if err := ing.HandleUpdate(ctx, Update{
 		UpdateID: 3,
 		Message: &Message{
-			MessageID:       10,
-			MessageThreadID: &threadID,
-			Chat:            Chat{ID: -1001, Type: "group", Title: "Core"},
-			Date:            1200,
-			ForumTopicCreated: &ForumTopicCreated{
-				Name: "Releases",
-			},
+			MessageID:         10,
+			MessageThreadID:   &threadID,
+			Chat:              Chat{ID: -1001, Type: "group", Title: "Core"},
+			Date:              1200,
+			ForumTopicCreated: &ForumTopicCreated{Name: "Releases"},
 		},
 	}); err != nil {
 		t.Fatalf("topic created: %v", err)
@@ -169,7 +213,6 @@ func TestIngestorMessagesTopicsMigrationAndACL(t *testing.T) {
 		t.Fatalf("offrecord message: %v", err)
 	}
 
-	// 4. Group migrates to supergroup -100999.
 	if err := ing.HandleUpdate(ctx, Update{
 		UpdateID: 6,
 		Message: &Message{
@@ -205,7 +248,7 @@ func TestIngestorMessagesTopicsMigrationAndACL(t *testing.T) {
 	}
 }
 
-func TestIngestorPrivateCommands(t *testing.T) {
+func TestIngestorPrivateCommandsAndHideToken(t *testing.T) {
 	ctx := context.Background()
 	store := openIngestorStore(t)
 	api := &fakeAPI{me: User{ID: 555, Username: "corp_bot", FirstName: "Corp", CanReadAllGroupMessages: true}}
@@ -224,11 +267,11 @@ func TestIngestorPrivateCommands(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("outsider /auth: %v", err)
 	}
-	if len(api.sentMessages) != 1 || !strings.Contains(api.sentMessages[0].text, "Доступ отклонён") {
-		t.Fatalf("expected rejection for outsider, got %+v", api.sentMessages)
+	if len(api.sentMessages) != 1 || !strings.Contains(api.sentMessages[0].text, "Access denied") {
+		t.Fatalf("expected Access denied for outsider, got %+v", api.sentMessages)
 	}
 
-	// 2. Corporate member (user 200) receives a Bearer token via /auth.
+	// 2. Corporate member (user 200) receives a Bearer token + Hide token button via /auth.
 	if err := ing.HandleUpdate(ctx, Update{
 		UpdateID: 2,
 		Message: &Message{
@@ -240,20 +283,35 @@ func TestIngestorPrivateCommands(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("member /auth: %v", err)
 	}
-	if len(api.sentMessages) != 2 || !strings.Contains(api.sentMessages[1].text, "tgmcp_") {
-		t.Fatalf("expected token for member, got %+v", api.sentMessages)
+	if len(api.sentMessages) != 2 || !strings.Contains(api.sentMessages[1].text, "tgmcp_") || api.sentMessages[1].keyboard == nil {
+		t.Fatalf("expected token with inline keyboard for member, got %+v", api.sentMessages)
 	}
 
-	// Extract issued token and confirm it validates.
 	var token string
 	for _, field := range strings.Fields(api.sentMessages[1].text) {
 		if strings.HasPrefix(field, "tgmcp_") {
-			token = strings.TrimRight(field, `").`)
+			token = strings.TrimRight(field, `").}`)
 			break
 		}
 	}
 	if uid, err := store.ValidateAuthToken(ctx, token, time.Now()); err != nil || uid != 200 {
 		t.Fatalf("expected issued token to validate for 200, got (%d, %v)", uid, err)
+	}
+
+	// 2b. Clicking "Hide token" edits the message to remove the secret.
+	if err := ing.HandleUpdate(ctx, Update{
+		UpdateID: 20,
+		CallbackQuery: &CallbackQuery{
+			ID:      "cb_1",
+			From:    User{ID: 200},
+			Message: &Message{MessageID: 99, Chat: Chat{ID: 200, Type: "private"}},
+			Data:    callbackHideToken,
+		},
+	}); err != nil {
+		t.Fatalf("hide_token callback: %v", err)
+	}
+	if len(api.editedMessages) != 1 || !strings.Contains(api.editedMessages[0].text, "Token hidden") {
+		t.Fatalf("expected message to be edited on hide_token, got %+v", api.editedMessages)
 	}
 
 	// 3. Non-admin (200) cannot run /revoke_user.
@@ -268,7 +326,7 @@ func TestIngestorPrivateCommands(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("non-admin revoke: %v", err)
 	}
-	if !strings.Contains(api.sentMessages[2].text, "только администраторам") {
+	if !strings.Contains(api.sentMessages[2].text, "restricted to administrators") {
 		t.Fatalf("expected admin-only error, got %q", api.sentMessages[2].text)
 	}
 
@@ -359,11 +417,81 @@ func TestIngestorPrivateCommands(t *testing.T) {
 	}
 }
 
+func TestIngestorOAuthOnboardingAndDeepLinkApproval(t *testing.T) {
+	ctx := context.Background()
+	store := openIngestorStore(t)
+	api := &fakeAPI{me: User{ID: 555, Username: "corp_bot", FirstName: "Corp", CanReadAllGroupMessages: true}}
+	cfg := testConfig(t, map[string]string{
+		"OAUTH_ENABLED":   "true",
+		"PUBLIC_BASE_URL": "https://tg-mcp.company.internal",
+		"MCP_SERVER_NAME": "company-telegram",
+	})
+	approver := &fakeOAuthApprover{}
+	ing := NewIngestor(api, store, cfg, fakeAccess{allowed: map[int64]bool{200: true}}, nil)
+	ing.SetOAuthApprover(approver)
+	_, _ = ing.Bootstrap(ctx)
+
+	// 1. Outsider running /start must NOT see PUBLIC_BASE_URL or setup prompt.
+	_ = ing.HandleUpdate(ctx, Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 1,
+			Chat:      Chat{ID: 999, Type: "private"},
+			From:      &User{ID: 999},
+			Text:      "/start",
+		},
+	})
+	if strings.Contains(api.sentMessages[0].text, "tg-mcp.company.internal") {
+		t.Fatalf("outsider must not receive internal server URL: %q", api.sentMessages[0].text)
+	}
+
+	// 2. Workspace member running /start receives OAuth 2.1 AI agent prompt with URL and zero secrets.
+	_ = ing.HandleUpdate(ctx, Update{
+		UpdateID: 2,
+		Message: &Message{
+			MessageID: 2,
+			Chat:      Chat{ID: 200, Type: "private"},
+			From:      &User{ID: 200},
+			Text:      "/start",
+		},
+	})
+	if !strings.Contains(api.sentMessages[1].text, "https://tg-mcp.company.internal/mcp") || !strings.Contains(api.sentMessages[1].text, "MCP OAuth 2.1") {
+		t.Fatalf("expected OAuth onboarding prompt for member, got %q", api.sentMessages[1].text)
+	}
+
+	// 3. Member approves OAuth deep-link /start login_nonce123.
+	_ = ing.HandleUpdate(ctx, Update{
+		UpdateID: 3,
+		Message: &Message{
+			MessageID: 3,
+			Chat:      Chat{ID: 200, Type: "private"},
+			From:      &User{ID: 200},
+			Text:      "/start login_nonce123",
+		},
+	})
+	if approver.approved["nonce123"] != 200 {
+		t.Fatalf("expected nonce123 approved for user 200, got %+v", approver.approved)
+	}
+
+	// 4. Outsider clicking OAuth deep-link /start login_nonce456 denies session.
+	_ = ing.HandleUpdate(ctx, Update{
+		UpdateID: 4,
+		Message: &Message{
+			MessageID: 4,
+			Chat:      Chat{ID: 999, Type: "private"},
+			From:      &User{ID: 999},
+			Text:      "/start login_nonce456",
+		},
+	})
+	if !approver.denied["nonce456"] {
+		t.Fatalf("expected nonce456 denied for outsider, got %+v", approver.denied)
+	}
+}
+
 func TestIngestorDowntimeAlertAndPrivateJSONImport(t *testing.T) {
 	ctx := context.Background()
 	store := openIngestorStore(t)
 
-	// Pre-seed bot with a last_poll_at 26 hours in the past.
 	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
 	oldPoll := now.Add(-26 * time.Hour).Unix()
 	_ = store.UpsertBot(ctx, storage.Bot{BotID: 555, Username: "corp_bot"})
@@ -374,8 +502,8 @@ func TestIngestorDowntimeAlertAndPrivateJSONImport(t *testing.T) {
 		"type": "private_supergroup",
 		"id": 999888777,
 		"messages": [
-			{"id": 1, "type": "message", "date_unixtime": "1795250000", "from": "Alice", "from_id": "user101", "text": "Восстановленное сообщение за выходные"},
-			{"id": 2, "type": "message", "date_unixtime": "1795250100", "from": "Bob", "from_id": "user102", "text": "Секрет #offrecord"}
+			{"id": 1, "type": "message", "date_unixtime": "1795250000", "from": "Alice", "from_id": "user101", "text": "Recovered weekend discussion"},
+			{"id": 2, "type": "message", "date_unixtime": "1795250100", "from": "Bob", "from_id": "user102", "text": "Secret #offrecord"}
 		]
 	}`)
 
@@ -387,15 +515,13 @@ func TestIngestorDowntimeAlertAndPrivateJSONImport(t *testing.T) {
 	ing := NewIngestor(api, store, testConfig(t), fakeAccess{}, nil)
 	ing.nowFunc = func() time.Time { return now }
 
-	// 1. Bootstrap detects 26h downtime and notifies admin 1000.
 	if _, err := ing.Bootstrap(ctx); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	if len(api.sentMessages) != 1 || api.sentMessages[0].chatID != 1000 || !strings.Contains(api.sentMessages[0].text, "длительный простой") {
+	if len(api.sentMessages) != 1 || api.sentMessages[0].chatID != 1000 || !strings.Contains(api.sentMessages[0].text, "Extended server downtime") {
 		t.Fatalf("expected downtime alert to admin 1000, got %+v", api.sentMessages)
 	}
 
-	// 2. Non-admin sending result.json is rejected.
 	if err := ing.HandleUpdate(ctx, Update{
 		UpdateID: 10,
 		Message: &Message{
@@ -407,11 +533,10 @@ func TestIngestorDowntimeAlertAndPrivateJSONImport(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("non-admin doc import: %v", err)
 	}
-	if !strings.Contains(api.sentMessages[1].text, "только администраторам") {
+	if !strings.Contains(api.sentMessages[1].text, "restricted to administrators") {
 		t.Fatalf("expected admin-only rejection, got %q", api.sentMessages[1].text)
 	}
 
-	// 3. Admin sends result.json in DM -> imported into DB and searchable via FTS5!
 	if err := ing.HandleUpdate(ctx, Update{
 		UpdateID: 11,
 		Message: &Message{
@@ -423,7 +548,7 @@ func TestIngestorDowntimeAlertAndPrivateJSONImport(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("admin doc import: %v", err)
 	}
-	if !strings.Contains(api.sentMessages[2].text, "Импортировано сообщений: 1") {
+	if !strings.Contains(api.sentMessages[2].text, "Imported messages: 1") {
 		t.Fatalf("expected import summary with 1 imported message, got %q", api.sentMessages[2].text)
 	}
 
@@ -440,7 +565,7 @@ func TestIngestorDowntimeAlertAndPrivateJSONImport(t *testing.T) {
 	})
 	found, err := store.SearchMessages(ctx, storage.SearchParams{
 		TelegramUserID:       1000,
-		Query:                "Восстановленное",
+		Query:                "Recovered",
 		DefaultHistoryPolicy: config.HistoryPolicyFull,
 	})
 	if err != nil || len(found) != 1 {

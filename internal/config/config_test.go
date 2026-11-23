@@ -89,6 +89,11 @@ func TestLoadValidationErrors(t *testing.T) {
 		{"embedding missing model", map[string]string{"EMBEDDING_MODE": "openai_compatible", "EMBEDDING_BASE_URL": "http://127.0.0.1:11434/v1"}},
 		{"invalid whisper mode", map[string]string{"WHISPER_MODE": "magic"}},
 		{"whisper missing base url", map[string]string{"WHISPER_MODE": "openai_compatible"}},
+		{"oauth missing public url", map[string]string{"OAUTH_ENABLED": "true"}},
+		{"invalid public base url", map[string]string{"PUBLIC_BASE_URL": "ftp://example.com"}},
+		{"invalid oauth enabled", map[string]string{"OAUTH_ENABLED": "maybe"}},
+		{"invalid oauth access ttl", map[string]string{"OAUTH_ACCESS_TOKEN_TTL": "-5m"}},
+		{"negative oauth refresh days", map[string]string{"OAUTH_REFRESH_TOKEN_DAYS": "-1"}},
 	}
 
 	for _, tc := range cases {

@@ -107,6 +107,13 @@ type Config struct {
 	WhisperLanguage     string
 	WhisperPollInterval time.Duration
 	WhisperMaxFileBytes int64
+
+	// MCP OAuth 2.1 & onboarding (v0.3)
+	PublicBaseURL         string
+	MCPServerName         string
+	OAuthEnabled          bool
+	OAuthAccessTokenTTL   time.Duration
+	OAuthRefreshTokenDays int
 }
 
 // Load reads optional .env files (if they exist) and parses environment variables.
@@ -354,6 +361,48 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 		if cfg.WhisperModel == "" {
 			return Config{}, errors.New("WHISPER_MODEL is required when WHISPER_MODE=openai_compatible")
 		}
+	}
+
+	// MCP OAuth 2.1 & onboarding settings
+	cfg.PublicBaseURL = strings.TrimRight(get("PUBLIC_BASE_URL", ""), "/")
+	cfg.MCPServerName = get("MCP_SERVER_NAME", "company-telegram")
+	if cfg.MCPServerName == "" {
+		cfg.MCPServerName = "company-telegram"
+	}
+
+	if cfg.PublicBaseURL != "" {
+		u, err := url.Parse(cfg.PublicBaseURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return Config{}, fmt.Errorf("invalid PUBLIC_BASE_URL %q: must be http(s) URL", cfg.PublicBaseURL)
+		}
+	}
+
+	oauthEnabledRaw := strings.ToLower(get("OAUTH_ENABLED", "false"))
+	switch oauthEnabledRaw {
+	case "true", "1", "yes", "on":
+		cfg.OAuthEnabled = true
+	case "false", "0", "no", "off", "":
+		cfg.OAuthEnabled = false
+	default:
+		return Config{}, fmt.Errorf("invalid OAUTH_ENABLED %q: must be true or false", oauthEnabledRaw)
+	}
+
+	accessTTLRaw := get("OAUTH_ACCESS_TOKEN_TTL", "24h")
+	accessTTL, err := time.ParseDuration(accessTTLRaw)
+	if err != nil || accessTTL <= 0 {
+		return Config{}, fmt.Errorf("invalid OAUTH_ACCESS_TOKEN_TTL %q: must be positive Go duration", accessTTLRaw)
+	}
+	cfg.OAuthAccessTokenTTL = accessTTL
+
+	refreshDaysRaw := get("OAUTH_REFRESH_TOKEN_DAYS", "90")
+	refreshDays, err := strconv.Atoi(refreshDaysRaw)
+	if err != nil || refreshDays < 0 {
+		return Config{}, fmt.Errorf("invalid OAUTH_REFRESH_TOKEN_DAYS %q: must be >= 0", refreshDaysRaw)
+	}
+	cfg.OAuthRefreshTokenDays = refreshDays
+
+	if cfg.OAuthEnabled && cfg.PublicBaseURL == "" {
+		return Config{}, errors.New("PUBLIC_BASE_URL is required when OAUTH_ENABLED=true")
 	}
 
 	return cfg, nil

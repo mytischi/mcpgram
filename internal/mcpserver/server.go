@@ -21,15 +21,28 @@ const (
 	maxPollStaleness       = 5 * time.Minute
 )
 
-// Server hosts the Read-Only Streamable HTTP MCP endpoint (/mcp) and healthcheck (/healthz).
+// OAuthRegistrar mounts optional MCP OAuth 2.1 endpoints onto the server's HTTP mux.
+type OAuthRegistrar interface {
+	RegisterRoutes(mux *http.ServeMux)
+	ProtectedResourceMetadataURL() string
+}
+
+// Server hosts the Read-Only Streamable HTTP MCP endpoint (/mcp), healthcheck (/healthz),
+// and optional MCP OAuth 2.1 endpoints.
 type Server struct {
 	store      *storage.Store
 	searcher   storage.Searcher
 	authorizer *rbac.Authorizer
+	oauth      OAuthRegistrar
 	cfg        config.Config
 	logger     *slog.Logger
 	nowFunc    func() time.Time
 	mcpServer  *mcp.Server
+}
+
+// SetOAuth attaches an optional OAuth 2.1 server to be mounted alongside /mcp.
+func (s *Server) SetOAuth(oauthSrv OAuthRegistrar) {
+	s.oauth = oauthSrv
 }
 
 // New constructs a Read-Only MCP Server wired to storage, searcher, and RBAC authorizer.
@@ -50,7 +63,7 @@ func New(store *storage.Store, searcher storage.Searcher, authorizer *rbac.Autho
 		nowFunc:    time.Now,
 		mcpServer: mcp.NewServer(&mcp.Implementation{
 			Name:    "mcpgram",
-			Version: "0.2.1",
+			Version: "0.3.0",
 		}, nil),
 	}
 
@@ -58,7 +71,8 @@ func New(store *storage.Store, searcher storage.Searcher, authorizer *rbac.Autho
 	return s
 }
 
-// Handler returns the HTTP handler serving /mcp (Bearer-authenticated) and /healthz.
+// Handler returns the HTTP handler serving /mcp (Bearer-authenticated), /healthz,
+// and optional MCP OAuth 2.1 endpoints when enabled.
 func (s *Server) Handler() http.Handler {
 	streamable := mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server {
 		return s.mcpServer
@@ -70,7 +84,12 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", AuthMiddleware(s.store, s.nowFunc, streamable))
+	resourceMetadataURL := ""
+	if s.oauth != nil {
+		s.oauth.RegisterRoutes(mux)
+		resourceMetadataURL = s.oauth.ProtectedResourceMetadataURL()
+	}
+	mux.Handle("/mcp", AuthMiddleware(s.store, s.nowFunc, resourceMetadataURL, streamable))
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	return mux
 }

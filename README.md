@@ -40,8 +40,12 @@ go build -o bin/mcpgram ./cmd/mcpgram
 
 1. In `@BotFather`, create a bot, run `/setjoingroups` → **Enable** and `/setprivacy` → **Disable**.
 2. Add the bot to your corporate Telegram groups as **administrator** (strip dangerous rights like delete/ban/pin).
-3. Send `/auth` to the bot in a private DM to obtain your personal Bearer token (`tgmcp_...`).
-4. Add `mcpgram` to your MCP client config (`mcp.json` / `claude_desktop_config.json`):
+3. **Option 1 — MCP OAuth 2.1 (Recommended, zero manual tokens):**
+   - Set `OAUTH_ENABLED=true` and `PUBLIC_BASE_URL=https://tg-mcp.company.internal` (or `http://localhost:8080` locally) in `.env`.
+   - Employees open a DM with the bot and press **Start** (or `/connect`) — the bot silently verifies workspace chat membership and sends a ready-to-copy AI agent prompt with **no secrets**.
+   - The employee pastes the prompt to Cursor / Claude Code / OpenCode → clicks the OAuth link → clicks **"Confirm in Telegram"** → presses **Start** in the bot → tokens are saved automatically to the system keychain and rotated via refresh tokens.
+4. **Option 2 — Manual Bearer token (`/auth`):**
+   - Send `/auth` to the bot in a private DM to obtain a personal Bearer token (`tgmcp_...`) + ready-to-copy `mcp.json` / `claude mcp add` snippets + a **"🗑 Hide token"** button.
 
 ```json
 {
@@ -56,16 +60,16 @@ go build -o bin/mcpgram ./cmd/mcpgram
 }
 ```
 
-## Bot Commands (Private DM)
+## Bot Commands (Private DM, English UI)
 
 | Command | Who | Description |
 |---|---|---|
-| `/start` | Anyone | Shows your numeric `Telegram ID` and available commands |
-| `/auth` | Corporate chat members & admins | Issues a personal Bearer token (revokes any previous token) |
-| `/status` | `ADMIN_TG_IDS` | Shows bot diagnostics, Privacy Mode status, digest status, and tracked chats (`ws=...`) |
+| `/start` / `/connect` | Workspace members & admins | Silently verifies chat membership and sends setup steps + a ready-to-copy AI agent prompt (never leaks internal server URL to outsiders) |
+| `/auth` | Workspace members & admins | Issues a manual Bearer token with ready snippets + "🗑 Hide token" button |
+| `/status` | `ADMIN_TG_IDS` | Shows bot diagnostics, OAuth status, Privacy Mode, workers, and tracked chats (`ws=...`) |
 | `/digest [YYYY-MM-DD\|today]` | `ADMIN_TG_IDS` | Triggers nightly digest generation on demand (pending days or a specific date) |
 | `/set_policy <ws_id> <full_history\|since_join\|default>` | `ADMIN_TG_IDS` | Sets or resets per-chat history visibility override |
-| `/revoke_user <telegram_user_id>` | `ADMIN_TG_IDS` | Immediately revokes all active tokens for a user |
+| `/revoke_user <telegram_user_id>` | `ADMIN_TG_IDS` | Immediately revokes all active Bearer & OAuth refresh tokens for a user |
 | *(send `result.json` file)* | `ADMIN_TG_IDS` | Imports a Telegram Desktop JSON export directly in bot DM without SSH (up to 20 MiB, deduplicated) |
 
 > On startup, if server downtime exceeded **20 hours**, `mcpgram` automatically alerts `ADMIN_TG_IDS` in Telegram DM so any gap beyond Telegram's 24h update window can be backfilled by dropping `result.json` into the bot chat. `/healthz` also returns `503` if polling has been stale for > 5 minutes.

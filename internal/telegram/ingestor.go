@@ -18,15 +18,17 @@ import (
 const (
 	downtimeAlertThreshold = 20 * time.Hour
 	maxBotImportFileBytes  = 20 << 20 // 20 MiB Telegram Bot API getFile limit
+	callbackHideToken      = "hide_token"
 )
 
-// AllowedUpdates explicitly requests chat_member and my_chat_member events
+// AllowedUpdates explicitly requests chat_member, my_chat_member, and callback_query events
 // (Telegram omits chat_member unless listed explicitly).
 var AllowedUpdates = []string{
 	"message",
 	"edited_message",
 	"chat_member",
 	"my_chat_member",
+	"callback_query",
 }
 
 // AccessChecker verifies whether a Telegram user belongs to at least one tracked corporate chat.
@@ -42,24 +44,26 @@ type DigestTrigger interface {
 	TodayDate() string
 }
 
-// Ingestor polls Telegram updates, stores group messages/topics/ACL, and handles DM bot commands.
-type Ingestor struct {
-	api          API
-	store        *storage.Store
-	cfg          config.Config
-	access       AccessChecker
-	digestRunner DigestTrigger
-	logger       *slog.Logger
-	pollTimeout  int
-	botID        int64
-	botUsername  string
-	canReadAll   bool
-	nowFunc      func() time.Time
+// OAuthApprover connects Telegram /start login_<nonce> confirmations to the MCP OAuth 2.1 server.
+type OAuthApprover interface {
+	ApproveLogin(ctx context.Context, nonce string, telegramUserID int64) error
+	DenyLogin(ctx context.Context, nonce string) error
 }
 
-// SetDigestRunner attaches an optional DigestTrigger for the admin /digest command.
-func (i *Ingestor) SetDigestRunner(runner DigestTrigger) {
-	i.digestRunner = runner
+// Ingestor polls Telegram updates, stores group messages/topics/ACL, and handles DM bot commands.
+type Ingestor struct {
+	api           API
+	store         *storage.Store
+	cfg           config.Config
+	access        AccessChecker
+	digestRunner  DigestTrigger
+	oauthApprover OAuthApprover
+	logger        *slog.Logger
+	pollTimeout   int
+	botID         int64
+	botUsername   string
+	canReadAll    bool
+	nowFunc       func() time.Time
 }
 
 // NewIngestor creates an Ingestor bound to a Telegram API client, storage, config, and RBAC checker.
@@ -78,7 +82,18 @@ func NewIngestor(api API, store *storage.Store, cfg config.Config, access Access
 	}
 }
 
-// Bootstrap runs getMe diagnostics, persists bot metadata, and registers private bot commands.
+// SetDigestRunner attaches an optional DigestTrigger for the admin /digest command.
+func (i *Ingestor) SetDigestRunner(runner DigestTrigger) {
+	i.digestRunner = runner
+}
+
+// SetOAuthApprover attaches an optional OAuthApprover for /start login_<nonce> confirmations.
+func (i *Ingestor) SetOAuthApprover(approver OAuthApprover) {
+	i.oauthApprover = approver
+}
+
+// Bootstrap runs getMe diagnostics, persists bot metadata, registers private bot commands,
+// and notifies admins if extended server downtime (>20h) was detected.
 func (i *Ingestor) Bootstrap(ctx context.Context) (int64, error) {
 	me, err := i.api.GetMe(ctx)
 	if err != nil {
@@ -111,11 +126,12 @@ func (i *Ingestor) Bootstrap(ctx context.Context) (int64, error) {
 	}
 
 	commands := []BotCommand{
-		{Command: "auth", Description: "Получить персональный Bearer-токен для MCP-клиента"},
-		{Command: "status", Description: "[Admin] Проверить состояние бота и отслеживаемых чатов"},
-		{Command: "digest", Description: "[Admin] Запустить генерацию дневных дайджестов"},
-		{Command: "set_policy", Description: "[Admin] Политика истории для чата (full_history|since_join|default)"},
-		{Command: "revoke_user", Description: "[Admin] Отозвать токены сотрудника по Telegram ID"},
+		{Command: "connect", Description: "Get setup instructions & ready prompt for your AI agent"},
+		{Command: "auth", Description: "Issue a manual Bearer token for CLI/non-OAuth MCP clients"},
+		{Command: "status", Description: "[Admin] Check bot health, workers, and tracked chats"},
+		{Command: "digest", Description: "[Admin] Trigger daily digest generation on demand"},
+		{Command: "set_policy", Description: "[Admin] Override chat history policy (full_history|since_join|default)"},
+		{Command: "revoke_user", Description: "[Admin] Revoke all tokens for a Telegram user ID"},
 	}
 	if err := i.api.SetMyCommands(ctx, commands); err != nil {
 		i.logger.Warn("failed to set bot commands menu", "error", err)
@@ -148,11 +164,11 @@ func (i *Ingestor) checkDowntimeAlert(ctx context.Context, botRec storage.Bot) {
 	)
 
 	alert := fmt.Sprintf(
-		"⚠️ Обнаружен длительный простой сервера: ~%d ч (с %s по %s UTC).\n"+
-			"Очередь Telegram Bot API хранит апдейты только 24 часа, поэтому часть сообщений за это время могла быть потеряна.\n\n"+
-			"Чтобы закрыть пробел без дублей:\n"+
-			"1. В Telegram Desktop откройте нужный чат → ⋮ → Export chat history → JSON (без медиа, выберите даты простоя).\n"+
-			"2. Отправьте файл result.json прямо сюда в личку бота (до 20 МБ).",
+		"⚠️ Extended server downtime detected: ~%dh (from %s to %s UTC).\n"+
+			"Telegram Bot API keeps queued updates for 24 hours, so some messages during this window may have been missed.\n\n"+
+			"To backfill the gap without duplicates:\n"+
+			"1. In Telegram Desktop, open the affected chat → ⋮ → Export chat history → JSON (uncheck media, select the downtime date range).\n"+
+			"2. Send the exported result.json file directly to me in this chat (up to 20 MiB).",
 		hours,
 		lastPoll.Format("2006-01-02 15:04"),
 		now.Format("2006-01-02 15:04"),
@@ -222,6 +238,8 @@ func (i *Ingestor) Run(ctx context.Context) error {
 // HandleUpdate dispatches a single Telegram update to the appropriate handler.
 func (i *Ingestor) HandleUpdate(ctx context.Context, upd Update) error {
 	switch {
+	case upd.CallbackQuery != nil:
+		return i.handleCallbackQuery(ctx, upd.CallbackQuery)
 	case upd.MyChatMember != nil:
 		return i.handleMyChatMember(ctx, upd.MyChatMember)
 	case upd.ChatMember != nil:
@@ -233,6 +251,18 @@ func (i *Ingestor) HandleUpdate(ctx context.Context, upd Update) error {
 	default:
 		return nil
 	}
+}
+
+func (i *Ingestor) handleCallbackQuery(ctx context.Context, cq *CallbackQuery) error {
+	if cq.Data == callbackHideToken && cq.Message != nil {
+		if err := i.api.EditMessageText(ctx, cq.Message.Chat.ID, cq.Message.MessageID,
+			"🔒 Token hidden. Run /auth anytime to issue a new token.",
+		); err != nil {
+			i.logger.Warn("failed to hide token message", "error", err)
+		}
+		return i.api.AnswerCallbackQuery(ctx, cq.ID, "Token hidden")
+	}
+	return i.api.AnswerCallbackQuery(ctx, cq.ID, "")
 }
 
 func (i *Ingestor) handleMyChatMember(ctx context.Context, ev *ChatMemberUpdated) error {
@@ -331,7 +361,6 @@ func (i *Ingestor) handleMessage(ctx context.Context, msg *Message, edited bool)
 		return nil
 	}
 
-	// Handle group -> supergroup chat ID migration before persisting anything.
 	if msg.MigrateToChatID != 0 {
 		if _, err := i.store.MigrateChat(ctx, msg.Chat.ID, msg.MigrateToChatID); err != nil {
 			return fmt.Errorf("migrate chat %d -> %d: %w", msg.Chat.ID, msg.MigrateToChatID, err)
@@ -361,7 +390,6 @@ func (i *Ingestor) handleMessage(ctx context.Context, msg *Message, edited bool)
 		return fmt.Errorf("upsert chat on message: %w", err)
 	}
 
-	// Track Forum Topic creations and renames.
 	if msg.MessageThreadID != nil {
 		if msg.ForumTopicCreated != nil && msg.ForumTopicCreated.Name != "" {
 			if err := i.store.UpsertTopic(ctx, storage.Topic{
@@ -386,7 +414,6 @@ func (i *Ingestor) handleMessage(ctx context.Context, msg *Message, edited bool)
 	text := msg.EffectiveText()
 	attachMeta := msg.ExtractAttachmentMeta()
 	if text == "" && attachMeta == nil {
-		// Pure service message (e.g., pinned message, topic created) — nothing to store in messages.
 		return nil
 	}
 
@@ -439,25 +466,20 @@ func (i *Ingestor) handlePrivateCommand(ctx context.Context, msg *Message) error
 
 	fields := strings.Fields(raw)
 	cmd := strings.ToLower(fields[0])
-	// Strip optional @bot_username suffix (e.g. /auth@company_bot).
 	if idx := strings.Index(cmd, "@"); idx != -1 {
 		cmd = cmd[:idx]
 	}
 
 	switch cmd {
-	case "/start", "/help":
-		reply := fmt.Sprintf(
-			"Привет! Я корпоративный MCP-бот (ваш Telegram ID: %d).\n\n"+
-				"Доступные команды:\n"+
-				"• /auth — получить персональный Bearer-токен для MCP-клиента\n"+
-				"• /status — диагностика сервера (только для администраторов)\n"+
-				"• /digest [YYYY-MM-DD|today] — запустить генерацию дайджестов (только для администраторов)\n"+
-				"• /set_policy <workspace_chat_id> <full_history|since_join|default> — политика истории для чата (только для администраторов)\n"+
-				"• /revoke_user <telegram_user_id> — мгновенный отзыв токенов (только для администраторов)\n"+
-				"• Импорт истории (админы): отправьте файл result.json из Telegram Desktop прямо в этот чат",
-			userID,
-		)
-		return i.api.SendMessage(ctx, msg.Chat.ID, reply)
+	case "/start":
+		if len(fields) >= 2 && strings.HasPrefix(fields[1], "login_") {
+			nonce := strings.TrimPrefix(fields[1], "login_")
+			return i.cmdOAuthConfirm(ctx, msg.Chat.ID, userID, nonce)
+		}
+		return i.cmdOnboarding(ctx, msg.Chat.ID, userID)
+
+	case "/connect", "/help":
+		return i.cmdOnboarding(ctx, msg.Chat.ID, userID)
 
 	case "/auth":
 		return i.cmdAuth(ctx, msg.Chat.ID, userID)
@@ -479,20 +501,110 @@ func (i *Ingestor) handlePrivateCommand(ctx context.Context, msg *Message) error
 	}
 }
 
-func (i *Ingestor) cmdAuth(ctx context.Context, chatID, userID int64) error {
-	allowed := i.cfg.IsAdmin(userID)
-	if !allowed && i.access != nil {
-		ok, err := i.access.HasAnyTrackedChatAccess(ctx, userID)
-		if err != nil {
-			i.logger.Error("auth membership check failed", "user_id", userID, "error", err)
-			return i.api.SendMessage(ctx, chatID, "Не удалось проверить ваш доступ к рабочим чатам. Попробуйте позже.")
+func (i *Ingestor) isWorkspaceMember(ctx context.Context, userID int64) (bool, error) {
+	if i.cfg.IsAdmin(userID) {
+		return true, nil
+	}
+	if i.access == nil {
+		return false, nil
+	}
+	return i.access.HasAnyTrackedChatAccess(ctx, userID)
+}
+
+func (i *Ingestor) cmdOAuthConfirm(ctx context.Context, chatID, userID int64, nonce string) error {
+	if i.oauthApprover == nil || !i.cfg.OAuthEnabled {
+		return i.api.SendMessage(ctx, chatID, "MCP OAuth 2.1 is not enabled on this server. Use /auth to obtain a Bearer token.")
+	}
+
+	allowed, err := i.isWorkspaceMember(ctx, userID)
+	if err != nil {
+		i.logger.Error("oauth membership check failed", "user_id", userID, "error", err)
+		return i.api.SendMessage(ctx, chatID, "Could not verify your workspace chat membership right now. Please try again shortly.")
+	}
+
+	if !allowed {
+		_ = i.oauthApprover.DenyLogin(ctx, nonce)
+		return i.api.SendMessage(ctx, chatID,
+			fmt.Sprintf("❌ Access denied (Telegram ID: %d). You are not a member of any tracked workspace chat.", userID),
+		)
+	}
+
+	if err := i.oauthApprover.ApproveLogin(ctx, nonce, userID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return i.api.SendMessage(ctx, chatID, "⚠️ This sign-in link has expired or was already used. Please restart sign-in from your MCP client.")
 		}
-		allowed = ok
+		return fmt.Errorf("approve oauth login: %w", err)
+	}
+
+	return i.api.SendMessage(ctx, chatID, "✅ Sign-in approved! You can return to your browser and MCP client now.")
+}
+
+func (i *Ingestor) cmdOnboarding(ctx context.Context, chatID, userID int64) error {
+	allowed, err := i.isWorkspaceMember(ctx, userID)
+	if err != nil {
+		i.logger.Error("onboarding membership check failed", "user_id", userID, "error", err)
+		return i.api.SendMessage(ctx, chatID,
+			fmt.Sprintf("Your Telegram ID: %d\n\nCould not verify workspace membership right now. Please try again later.", userID),
+		)
+	}
+
+	// Never leak PUBLIC_BASE_URL or setup prompts to outsiders not in any tracked chat.
+	if !allowed {
+		return i.api.SendMessage(ctx, chatID,
+			fmt.Sprintf("Your Telegram ID: %d\n\nAccess denied: you are not a member of any tracked workspace chat. Ask an administrator to add you to a workspace group first.", userID),
+		)
+	}
+
+	mcpURL := i.mcpEndpointURL()
+	serverName := i.cfg.MCPServerName
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Welcome to mcpgram! (Telegram ID: %d)\n\n", userID)
+
+	if i.cfg.OAuthEnabled && i.cfg.PublicBaseURL != "" {
+		fmt.Fprintf(&b, "Quick setup with MCP OAuth 2.1 (no manual tokens needed):\n")
+		fmt.Fprintf(&b, "1. Copy and send this prompt to your AI agent (Cursor, Claude Code, OpenCode, etc.):\n\n")
+		fmt.Fprintf(&b, "Connect the remote Streamable HTTP MCP server named %q at %s using standard MCP OAuth 2.1 (no manual Bearer token needed).\n\n", serverName, mcpURL)
+		fmt.Fprintf(&b, "2. When your client opens the authorization link, click \"Confirm in Telegram\" and press Start here.\n")
+		fmt.Fprintf(&b, "3. Done — your client saves credentials securely and refreshes them automatically.\n\n")
+		fmt.Fprintf(&b, "Using a CLI client without OAuth? Run /auth to get a manual Bearer token.")
+	} else {
+		fmt.Fprintf(&b, "Quick setup:\n")
+		fmt.Fprintf(&b, "1. Send this safe prompt (no secrets!) to your AI agent to add the config entry:\n\n")
+		fmt.Fprintf(&b, "Add a remote Streamable HTTP MCP server named %q at %s with header \"Authorization: Bearer PASTE_TOKEN_HERE\", then open the config file for me.\n\n", serverName, mcpURL)
+		fmt.Fprintf(&b, "2. Run /auth here to get your personal Bearer token and replace PASTE_TOKEN_HERE yourself.\n")
+		fmt.Fprintf(&b, "Never paste your token directly into an AI chat.")
+	}
+
+	if i.cfg.IsAdmin(userID) {
+		fmt.Fprintf(&b, "\n\nAdmin commands:\n")
+		fmt.Fprintf(&b, "• /status — server diagnostics & tracked chats\n")
+		fmt.Fprintf(&b, "• /digest [YYYY-MM-DD|today] — trigger daily digests\n")
+		fmt.Fprintf(&b, "• /set_policy <ws_id> <full_history|since_join|default> — per-chat history override\n")
+		fmt.Fprintf(&b, "• /revoke_user <telegram_user_id> — immediately revoke all user tokens\n")
+		fmt.Fprintf(&b, "• Send a Telegram Desktop result.json file here to import chat history")
+	}
+
+	return i.api.SendMessage(ctx, chatID, b.String())
+}
+
+func (i *Ingestor) mcpEndpointURL() string {
+	if i.cfg.PublicBaseURL != "" {
+		return i.cfg.PublicBaseURL + "/mcp"
+	}
+	return "http://localhost:8080/mcp"
+}
+
+func (i *Ingestor) cmdAuth(ctx context.Context, chatID, userID int64) error {
+	allowed, err := i.isWorkspaceMember(ctx, userID)
+	if err != nil {
+		i.logger.Error("auth membership check failed", "user_id", userID, "error", err)
+		return i.api.SendMessage(ctx, chatID, "Could not verify your workspace chat membership. Please try again later.")
 	}
 
 	if !allowed {
 		return i.api.SendMessage(ctx, chatID,
-			fmt.Sprintf("Доступ отклонён (Telegram ID: %d). Вы не состоите ни в одном отслеживаемом рабочем чате компании.", userID),
+			fmt.Sprintf("Access denied (Telegram ID: %d). You are not a member of any tracked workspace chat.", userID),
 		)
 	}
 
@@ -502,27 +614,41 @@ func (i *Ingestor) cmdAuth(ctx context.Context, chatID, userID int64) error {
 		return fmt.Errorf("issue auth token: %w", err)
 	}
 
-	validity := "бессрочно, до отзыва"
+	validity := "no expiration, until revoked"
 	if rec.ExpiresAt > 0 {
-		validity = "действует до " + time.Unix(rec.ExpiresAt, 0).UTC().Format("2006-01-02")
+		validity = "valid until " + time.Unix(rec.ExpiresAt, 0).UTC().Format("2006-01-02")
 	}
+	mcpURL := i.mcpEndpointURL()
+	serverName := i.cfg.MCPServerName
+
 	reply := fmt.Sprintf(
-		"Ваш Telegram ID: %d\n"+
-			"Персональный Bearer-токен (%s, предыдущий токен аннулирован):\n\n"+
+		"Telegram ID: %d\n"+
+			"Personal Bearer token (%s; previous manual token revoked):\n\n"+
 			"%s\n\n"+
-			"Добавьте его в конфиг MCP-клиента (headers.Authorization: \"Bearer %s\").\n"+
-			"Важно: никогда не вставляйте этот токен в обычный чат с ИИ.",
-		userID, validity, rawToken, rawToken,
+			"MCP client config (mcp.json):\n"+
+			"{\"mcpServers\":{%q:{\"url\":%q,\"headers\":{\"Authorization\":\"Bearer %s\"}}}}\n\n"+
+			"Claude Code CLI:\n"+
+			"claude mcp add --transport http %s %s --header \"Authorization: Bearer %s\"\n\n"+
+			"Security note: never paste this token into an AI chat. Click \"Hide token\" below once copied.",
+		userID, validity, rawToken,
+		serverName, mcpURL, rawToken,
+		serverName, mcpURL, rawToken,
 	)
-	return i.api.SendMessage(ctx, chatID, reply)
+
+	kb := &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{{Text: "🗑 Hide token", CallbackData: callbackHideToken}},
+		},
+	}
+	return i.api.SendMessageWithKeyboard(ctx, chatID, reply, kb)
 }
 
 func (i *Ingestor) cmdSetPolicy(ctx context.Context, chatID, userID int64, args []string) error {
 	if !i.cfg.IsAdmin(userID) {
-		return i.api.SendMessage(ctx, chatID, "Команда /set_policy доступна только администраторам (ADMIN_TG_IDS).")
+		return i.api.SendMessage(ctx, chatID, "The /set_policy command is restricted to administrators (ADMIN_TG_IDS).")
 	}
 	if len(args) != 2 {
-		return i.api.SendMessage(ctx, chatID, "Использование: /set_policy <workspace_chat_id> <full_history|since_join|default>")
+		return i.api.SendMessage(ctx, chatID, "Usage: /set_policy <workspace_chat_id> <full_history|since_join|default>")
 	}
 
 	wsChatID := strings.TrimSpace(args[0])
@@ -536,12 +662,12 @@ func (i *Ingestor) cmdSetPolicy(ctx context.Context, chatID, userID int64, args 
 		p := config.HistoryPolicy(rawPolicy)
 		policyPtr = &p
 	default:
-		return i.api.SendMessage(ctx, chatID, "Некорректная политика. Допустимо: full_history, since_join или default.")
+		return i.api.SendMessage(ctx, chatID, "Invalid policy. Allowed values: full_history, since_join, or default.")
 	}
 
 	err := i.store.SetChatHistoryPolicyOverride(ctx, wsChatID, policyPtr)
 	if errors.Is(err, storage.ErrNotFound) {
-		return i.api.SendMessage(ctx, chatID, fmt.Sprintf("Чат %s не найден. Посмотрите актуальный ws= в /status.", wsChatID))
+		return i.api.SendMessage(ctx, chatID, fmt.Sprintf("Chat %s not found. Check active ws= IDs via /status.", wsChatID))
 	}
 	if err != nil {
 		return fmt.Errorf("set chat history policy: %w", err)
@@ -549,17 +675,17 @@ func (i *Ingestor) cmdSetPolicy(ctx context.Context, chatID, userID int64, args 
 
 	if policyPtr == nil {
 		return i.api.SendMessage(ctx, chatID,
-			fmt.Sprintf("Для чата %s сброшено переопределение — используется глобальная политика (%s).", wsChatID, i.cfg.DefaultHistoryPolicy),
+			fmt.Sprintf("Cleared override for chat %s — now using global policy (%s).", wsChatID, i.cfg.DefaultHistoryPolicy),
 		)
 	}
 	return i.api.SendMessage(ctx, chatID,
-		fmt.Sprintf("Для чата %s установлена политика истории: %s.", wsChatID, *policyPtr),
+		fmt.Sprintf("Updated history policy for chat %s to: %s.", wsChatID, *policyPtr),
 	)
 }
 
 func (i *Ingestor) cmdStatus(ctx context.Context, chatID, userID int64) error {
 	if !i.cfg.IsAdmin(userID) {
-		return i.api.SendMessage(ctx, chatID, "Команда /status доступна только администраторам (ADMIN_TG_IDS).")
+		return i.api.SendMessage(ctx, chatID, "The /status command is restricted to administrators (ADMIN_TG_IDS).")
 	}
 
 	chats, err := i.store.ListAllChats(ctx)
@@ -568,36 +694,42 @@ func (i *Ingestor) cmdStatus(ctx context.Context, chatID, userID int64) error {
 	}
 
 	var b strings.Builder
-	privacyState := "OK (Privacy Mode отключен)"
+	privacyState := "OK (Privacy Mode disabled)"
 	if !i.canReadAll {
-		privacyState = "WARNING (Privacy Mode ВКЛЮЧЕН — отключите в @BotFather через /setprivacy)"
+		privacyState = "WARNING (Privacy Mode ENABLED — disable via @BotFather /setprivacy)"
+	}
+
+	retentionLabel := "unlimited (disabled)"
+	if i.cfg.RetentionDays > 0 {
+		retentionLabel = fmt.Sprintf("%d days", i.cfg.RetentionDays)
+	}
+	oauthLabel := "off (manual /auth)"
+	if i.cfg.OAuthEnabled {
+		oauthLabel = fmt.Sprintf("enabled (%s)", i.cfg.PublicBaseURL)
+	}
+	digestLabel := "off (DIGEST_MODE=off)"
+	if i.cfg.DigestMode == config.DigestModeOpenAICompatible {
+		digestLabel = fmt.Sprintf("enabled (%s, %02d:00 %s)", i.cfg.DigestModel, i.cfg.DigestScheduleHour, i.cfg.DigestTimezone)
+	}
+	embLabel := "off (FTS5 only)"
+	if i.cfg.EmbeddingMode == config.EmbeddingModeOpenAICompatible {
+		embLabel = fmt.Sprintf("hybrid FTS5 + Vector (%s)", i.cfg.EmbeddingModel)
+	}
+	whisperLabel := "off (WHISPER_MODE=off)"
+	if i.cfg.WhisperMode == config.WhisperModeOpenAICompatible {
+		whisperLabel = fmt.Sprintf("enabled (%s)", i.cfg.WhisperModel)
 	}
 
 	fmt.Fprintf(&b, "mcpgram status\n")
-	fmt.Fprintf(&b, "• Бот: @%s (id=%d)\n", i.botUsername, i.botID)
-	fmt.Fprintf(&b, "• Чтение групп: %s\n", privacyState)
-	fmt.Fprintf(&b, "• Политика истории по умолчанию: %s\n", i.cfg.DefaultHistoryPolicy)
-	retentionLabel := "бессрочно (отключено)"
-	if i.cfg.RetentionDays > 0 {
-		retentionLabel = fmt.Sprintf("%d дн.", i.cfg.RetentionDays)
-	}
-	digestLabel := "отключены (DIGEST_MODE=off)"
-	if i.cfg.DigestMode == config.DigestModeOpenAICompatible {
-		digestLabel = fmt.Sprintf("включены (%s, %02d:00 %s)", i.cfg.DigestModel, i.cfg.DigestScheduleHour, i.cfg.DigestTimezone)
-	}
-	embLabel := "выкл (только FTS5)"
-	if i.cfg.EmbeddingMode == config.EmbeddingModeOpenAICompatible {
-		embLabel = fmt.Sprintf("гибридный FTS5 + Vector (%s)", i.cfg.EmbeddingModel)
-	}
-	whisperLabel := "выкл (WHISPER_MODE=off)"
-	if i.cfg.WhisperMode == config.WhisperModeOpenAICompatible {
-		whisperLabel = fmt.Sprintf("вкл (%s)", i.cfg.WhisperModel)
-	}
+	fmt.Fprintf(&b, "• Bot: @%s (id=%d)\n", i.botUsername, i.botID)
+	fmt.Fprintf(&b, "• Group access: %s\n", privacyState)
+	fmt.Fprintf(&b, "• MCP OAuth 2.1: %s\n", oauthLabel)
+	fmt.Fprintf(&b, "• Default history policy: %s\n", i.cfg.DefaultHistoryPolicy)
 	fmt.Fprintf(&b, "• Retention: %s | Ignore tag: %s\n", retentionLabel, i.cfg.IgnoreTag)
-	fmt.Fprintf(&b, "• Ночные дайджесты: %s\n", digestLabel)
-	fmt.Fprintf(&b, "• Поиск: %s\n", embLabel)
-	fmt.Fprintf(&b, "• Whisper (голосовые): %s\n", whisperLabel)
-	fmt.Fprintf(&b, "• Отслеживаемых чатов: %d\n", len(chats))
+	fmt.Fprintf(&b, "• Nightly digests: %s\n", digestLabel)
+	fmt.Fprintf(&b, "• Search: %s\n", embLabel)
+	fmt.Fprintf(&b, "• Whisper: %s\n", whisperLabel)
+	fmt.Fprintf(&b, "• Tracked chats: %d\n", len(chats))
 
 	for _, c := range chats {
 		adminMark := "NO ADMIN"
@@ -617,15 +749,15 @@ func (i *Ingestor) cmdStatus(ctx context.Context, chatID, userID int64) error {
 
 func (i *Ingestor) cmdRevokeUser(ctx context.Context, chatID, userID int64, args []string) error {
 	if !i.cfg.IsAdmin(userID) {
-		return i.api.SendMessage(ctx, chatID, "Команда /revoke_user доступна только администраторам (ADMIN_TG_IDS).")
+		return i.api.SendMessage(ctx, chatID, "The /revoke_user command is restricted to administrators (ADMIN_TG_IDS).")
 	}
 	if len(args) != 1 {
-		return i.api.SendMessage(ctx, chatID, "Использование: /revoke_user <telegram_user_id>")
+		return i.api.SendMessage(ctx, chatID, "Usage: /revoke_user <telegram_user_id>")
 	}
 
 	targetID, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil || targetID <= 0 {
-		return i.api.SendMessage(ctx, chatID, "Некорректный telegram_user_id. Укажите числовой ID пользователя.")
+		return i.api.SendMessage(ctx, chatID, "Invalid telegram_user_id. Provide a positive numeric Telegram ID.")
 	}
 
 	count, err := i.store.RevokeUserTokens(ctx, targetID)
@@ -634,17 +766,17 @@ func (i *Ingestor) cmdRevokeUser(ctx context.Context, chatID, userID int64, args
 	}
 
 	return i.api.SendMessage(ctx, chatID,
-		fmt.Sprintf("Токены пользователя %d отозваны (активных аннулировано: %d).", targetID, count),
+		fmt.Sprintf("Revoked all access & refresh tokens for user %d (revoked count: %d).", targetID, count),
 	)
 }
 
 func (i *Ingestor) cmdDigest(ctx context.Context, chatID, userID int64, args []string) error {
 	if !i.cfg.IsAdmin(userID) {
-		return i.api.SendMessage(ctx, chatID, "Команда /digest доступна только администраторам (ADMIN_TG_IDS).")
+		return i.api.SendMessage(ctx, chatID, "The /digest command is restricted to administrators (ADMIN_TG_IDS).")
 	}
 	if i.digestRunner == nil || !i.digestRunner.Enabled() {
 		return i.api.SendMessage(ctx, chatID,
-			"Ночные дайджесты отключены. Включите DIGEST_MODE=openai_compatible (и DIGEST_BASE_URL + DIGEST_MODEL) в .env.",
+			"Nightly digests are disabled. Set DIGEST_MODE=openai_compatible (plus DIGEST_BASE_URL and DIGEST_MODEL) in .env.",
 		)
 	}
 
@@ -653,22 +785,22 @@ func (i *Ingestor) cmdDigest(ctx context.Context, chatID, userID int64, args []s
 	var label string
 
 	if len(args) == 0 {
-		label = fmt.Sprintf("за последние %d дн.", i.cfg.DigestLookbackDays)
+		label = fmt.Sprintf("for the last %d days", i.cfg.DigestLookbackDays)
 		generated, skipped, failed, err = i.digestRunner.RunPending(ctx)
 	} else {
 		targetDate := strings.ToLower(strings.TrimSpace(args[0]))
 		if targetDate == "today" {
 			targetDate = i.digestRunner.TodayDate()
 		}
-		label = "за " + targetDate
+		label = "for " + targetDate
 		generated, skipped, failed, err = i.digestRunner.RunForDate(ctx, targetDate, true)
 	}
 	if err != nil {
-		return i.api.SendMessage(ctx, chatID, fmt.Sprintf("Ошибка генерации дайджестов (%s): %v", label, err))
+		return i.api.SendMessage(ctx, chatID, fmt.Sprintf("Digest generation failed (%s): %v", label, err))
 	}
 
 	return i.api.SendMessage(ctx, chatID,
-		fmt.Sprintf("Дайджесты %s готовы: создано/обновлено=%d, пропущено=%d, ошибок=%d.", label, generated, skipped, failed),
+		fmt.Sprintf("Digests %s ready: generated=%d, skipped=%d, failed=%d.", label, generated, skipped, failed),
 	)
 }
 
@@ -678,18 +810,18 @@ func (i *Ingestor) handlePrivateDocument(ctx context.Context, msg *Message) erro
 	}
 	userID := msg.From.ID
 	if !i.cfg.IsAdmin(userID) {
-		return i.api.SendMessage(ctx, msg.Chat.ID, "Импорт файлов result.json доступен только администраторам (ADMIN_TG_IDS).")
+		return i.api.SendMessage(ctx, msg.Chat.ID, "Importing result.json files is restricted to administrators (ADMIN_TG_IDS).")
 	}
 
 	doc := msg.Document
 	lowerName := strings.ToLower(strings.TrimSpace(doc.FileName))
 	lowerMime := strings.ToLower(strings.TrimSpace(doc.MimeType))
 	if !strings.HasSuffix(lowerName, ".json") && lowerMime != "application/json" {
-		return i.api.SendMessage(ctx, msg.Chat.ID, "Ожидается JSON-файл экспорта из Telegram Desktop (например, result.json).")
+		return i.api.SendMessage(ctx, msg.Chat.ID, "Expected a Telegram Desktop JSON export file (e.g. result.json).")
 	}
 	if doc.FileSize > maxBotImportFileBytes {
 		return i.api.SendMessage(ctx, msg.Chat.ID,
-			"Файл превышает лимит Telegram Bot API (20 МБ). Экспортируйте чат частями по датам или используйте CLI: mcpgram import --file result.json",
+			"File exceeds Telegram Bot API limit (20 MiB). Export a smaller date range or use CLI: mcpgram import --file result.json",
 		)
 	}
 
@@ -704,11 +836,11 @@ func (i *Ingestor) handlePrivateDocument(ctx context.Context, msg *Message) erro
 
 	fileInfo, err := i.api.GetFile(ctx, doc.FileID)
 	if err != nil {
-		return i.api.SendMessage(ctx, msg.Chat.ID, fmt.Sprintf("Не удалось получить файл из Telegram: %v", err))
+		return i.api.SendMessage(ctx, msg.Chat.ID, fmt.Sprintf("Failed to fetch file metadata from Telegram: %v", err))
 	}
 	data, err := i.api.DownloadFile(ctx, fileInfo.FilePath, maxBotImportFileBytes)
 	if err != nil {
-		return i.api.SendMessage(ctx, msg.Chat.ID, fmt.Sprintf("Не удалось скачать файл: %v", err))
+		return i.api.SendMessage(ctx, msg.Chat.ID, fmt.Sprintf("Failed to download file: %v", err))
 	}
 
 	stats, err := importer.ImportDesktopReader(ctx, i.store, bytes.NewReader(data), importer.Options{
@@ -718,17 +850,17 @@ func (i *Ingestor) handlePrivateDocument(ctx context.Context, msg *Message) erro
 		Now:                    i.nowFunc().UTC(),
 	})
 	if err != nil {
-		return i.api.SendMessage(ctx, msg.Chat.ID, fmt.Sprintf("Ошибка импорта %s: %v", doc.FileName, err))
+		return i.api.SendMessage(ctx, msg.Chat.ID, fmt.Sprintf("Failed to import %s: %v", doc.FileName, err))
 	}
 
 	reply := fmt.Sprintf(
-		"Импорт %s завершён (без дублей):\n"+
-			"• Чат: %s (tg_id=%d, ws=%s)\n"+
-			"• Импортировано сообщений: %d\n"+
-			"• Пропущено (%s): %d\n"+
-			"• Пропущено (старше retention): %d\n"+
-			"• Сервисных/пустых: %d\n\n"+
-			"Поиск (FTS5) уже обновлён. Семантический индекс подхватит новые сообщения автоматически.",
+		"Import of %s complete (deduplicated):\n"+
+			"• Chat: %s (tg_id=%d, ws=%s)\n"+
+			"• Imported messages: %d\n"+
+			"• Ignored (%s): %d\n"+
+			"• Skipped (older than retention): %d\n"+
+			"• Service/empty skipped: %d\n\n"+
+			"FTS5 search is updated immediately. Semantic indexing will pick up new messages automatically.",
 		doc.FileName, stats.ChatTitle, stats.TelegramChatID, stats.WorkspaceChatID,
 		stats.Imported, i.cfg.IgnoreTag, stats.IgnoredOffrec,
 		stats.SkippedOld, stats.SkippedNonMsg,

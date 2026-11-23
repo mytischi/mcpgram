@@ -918,6 +918,16 @@ func (s *Store) GetThread(ctx context.Context, params ThreadParams) ([]Message, 
 // Only the SHA-256 hash is stored in the database; rawToken is returned once to the caller.
 // When ttl <= 0, the token does not expire automatically (expires_at = 0) until explicitly revoked.
 func (s *Store) IssueAuthToken(ctx context.Context, telegramUserID int64, ttl time.Duration) (rawToken string, rec AuthToken, err error) {
+	return s.issueAuthToken(ctx, telegramUserID, ttl, true)
+}
+
+// IssueAccessToken issues a Bearer access token without revoking the user's other active tokens
+// (so OAuth 2.1 clients like Cursor and Claude Code can stay authenticated concurrently).
+func (s *Store) IssueAccessToken(ctx context.Context, telegramUserID int64, ttl time.Duration) (rawToken string, rec AuthToken, err error) {
+	return s.issueAuthToken(ctx, telegramUserID, ttl, false)
+}
+
+func (s *Store) issueAuthToken(ctx context.Context, telegramUserID int64, ttl time.Duration, revokePrevious bool) (rawToken string, rec AuthToken, err error) {
 	buf := make([]byte, 24)
 	if _, err := rand.Read(buf); err != nil {
 		return "", AuthToken{}, fmt.Errorf("generate token entropy: %w", err)
@@ -939,12 +949,14 @@ func (s *Store) IssueAuthToken(ctx context.Context, telegramUserID int64, ttl ti
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE auth_tokens
-		SET revoked_at = ?
-		WHERE telegram_user_id = ? AND revoked_at IS NULL
-	`, nowUnix, telegramUserID); err != nil {
-		return "", AuthToken{}, fmt.Errorf("revoke previous tokens: %w", err)
+	if revokePrevious {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE auth_tokens
+			SET revoked_at = ?
+			WHERE telegram_user_id = ? AND revoked_at IS NULL
+		`, nowUnix, telegramUserID); err != nil {
+			return "", AuthToken{}, fmt.Errorf("revoke previous tokens: %w", err)
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -995,17 +1007,37 @@ func (s *Store) ValidateAuthToken(ctx context.Context, rawToken string, now time
 	return userID, nil
 }
 
-// RevokeUserTokens immediately revokes all active tokens for telegramUserID.
+// RevokeUserTokens immediately revokes all active Bearer tokens, OAuth refresh tokens,
+// and any pending OAuth sessions for telegramUserID.
 func (s *Store) RevokeUserTokens(ctx context.Context, telegramUserID int64) (int64, error) {
+	nowUnix := time.Now().UTC().Unix()
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE auth_tokens
 		SET revoked_at = ?
 		WHERE telegram_user_id = ? AND revoked_at IS NULL
-	`, time.Now().UTC().Unix(), telegramUserID)
+	`, nowUnix, telegramUserID)
 	if err != nil {
 		return 0, fmt.Errorf("revoke user tokens %d: %w", telegramUserID, err)
 	}
-	return res.RowsAffected()
+	authCount, _ := res.RowsAffected()
+
+	refRes, err := s.db.ExecContext(ctx, `
+		UPDATE oauth_refresh_tokens
+		SET revoked_at = ?
+		WHERE telegram_user_id = ? AND revoked_at IS NULL
+	`, nowUnix, telegramUserID)
+	if err != nil {
+		return authCount, fmt.Errorf("revoke user refresh tokens %d: %w", telegramUserID, err)
+	}
+	refCount, _ := refRes.RowsAffected()
+
+	_, _ = s.db.ExecContext(ctx, `
+		UPDATE oauth_sessions
+		SET status = 'denied'
+		WHERE telegram_user_id = ? AND status IN ('pending', 'approved')
+	`, telegramUserID)
+
+	return authCount + refCount, nil
 }
 
 // PurgeExpiredMessages deletes messages and daily digests older than retentionDays relative to now.
