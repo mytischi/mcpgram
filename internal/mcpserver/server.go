@@ -63,7 +63,7 @@ func New(store *storage.Store, searcher storage.Searcher, authorizer *rbac.Autho
 		nowFunc:    time.Now,
 		mcpServer: mcp.NewServer(&mcp.Implementation{
 			Name:    "mcpgram",
-			Version: "0.3.0",
+			Version: "0.3.1",
 		}, nil),
 	}
 
@@ -81,6 +81,9 @@ func (s *Server) Handler() http.Handler {
 		JSONResponse:   true,
 		SessionTimeout: 30 * time.Minute,
 		Logger:         s.logger,
+		// Reverse proxies (Tailscale Serve, Caddy, Nginx) forward requests from 127.0.0.1
+		// with the public Host header; /mcp is strictly Bearer-token authenticated via AuthMiddleware.
+		DisableLocalhostProtection: true,
 	})
 
 	mux := http.NewServeMux()

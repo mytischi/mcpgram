@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,4 +260,38 @@ func TestHealthzPollingFreshness(t *testing.T) {
 		t.Fatalf("expected 503 for stale poll, got (%v, %v)", resp, err)
 	}
 	_ = resp.Body.Close()
+}
+
+func TestReverseProxyHostHeaderAllowed(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	tok, _, err := store.IssueAuthToken(ctx, 1001, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	cfg, _ := config.LoadFromLookup(func(string) (string, bool) { return "", false })
+	authz := rbac.NewAuthorizer(store, &stubChecker{}, 5*time.Minute, nil)
+	srv := New(store, store, authz, cfg, nil)
+
+	// Simulate Tailscale Serve / Caddy reverse proxy: RemoteAddr=127.0.0.1 with a public Host header.
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"hermes","version":"1.0"}}}`
+	req := httptest.NewRequest(http.MethodPost, "http://shkafpc.tail96bcb8.ts.net/mcp", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = "shkafpc.tail96bcb8.ts.net"
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK behind reverse proxy with public Host header, got %d: %s", rec.Code, rec.Body.String())
+	}
 }

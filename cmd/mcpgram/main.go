@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata"
@@ -26,7 +28,7 @@ import (
 	"github.com/mytischi/mcpgram/internal/whisper"
 )
 
-const version = "0.3.0"
+const version = "0.3.1"
 
 type digestTriggerAdapter struct {
 	w *digest.Worker
@@ -173,6 +175,14 @@ func runServe() error {
 	mcpSrv := mcpserver.New(store, searcher, authorizer, cfg, logger)
 
 	if cfg.OAuthEnabled {
+		if u, err := url.Parse(cfg.PublicBaseURL); err == nil && strings.EqualFold(u.Scheme, "http") {
+			host := strings.ToLower(u.Hostname())
+			if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+				logger.Warn("OAUTH_ENABLED=true with non-HTTPS PUBLIC_BASE_URL: strict OAuth 2.1 clients (e.g. Claude Code) refuse non-TLS token endpoints outside localhost; terminate HTTPS via Caddy or Tailscale Serve",
+					"public_base_url", cfg.PublicBaseURL,
+				)
+			}
+		}
 		oauthSrv := oauth.NewServer(store, cfg, authorizer, logger)
 		mcpSrv.SetOAuth(oauthSrv)
 		ingestor.SetOAuthApprover(oauthSrv)
