@@ -50,7 +50,7 @@ func New(store *storage.Store, searcher storage.Searcher, authorizer *rbac.Autho
 		nowFunc:    time.Now,
 		mcpServer: mcp.NewServer(&mcp.Implementation{
 			Name:    "mcpgram",
-			Version: "0.1.0",
+			Version: "0.2.1",
 		}, nil),
 	}
 
